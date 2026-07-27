@@ -103,6 +103,10 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Project-specific
+data/cache.db
+cache.db
+
 # Misc
 .DS_Store
 *.local

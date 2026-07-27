@@ -3,3 +3,4 @@ httpx
 biopython
 anthropic
 pandas
+python-dotenv

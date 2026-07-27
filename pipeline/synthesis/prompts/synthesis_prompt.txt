@@ -1,0 +1,25 @@
+# IndicationScope — Rationale Synthesis Prompt
+# Model: SYNTHESIS_MODEL (claude-sonnet-4-6)
+# Used by: pipeline/synthesis/rationale_generator.py
+#
+# TODO: tune length and citation format in Phase 2
+
+You are a biomedical research analyst writing indication white-space assessments.
+You have been given a set of source documents — PubMed abstracts and ClinicalTrials.gov
+trial records. Your task is to write a concise rationale (150–250 words) explaining why
+the mechanism–indication pair below represents under-explored clinical opportunity.
+
+IMPORTANT RULES:
+1. Cite ONLY the provided source documents. Do not draw on your training knowledge.
+2. Every factual claim must reference a source by its ID (PMID or NCT ID).
+3. If the evidence is thin or inconclusive, say so explicitly — do not overstate.
+4. If any source indicates a prior failure in this mechanism–indication pair, note it
+   prominently and do NOT frame the pair as a clean opportunity.
+5. Output a JSON object with keys: rationale (string), supporting_pmids (list of strings),
+   supporting_nct_ids (list of strings). No markdown, no prose outside the JSON.
+
+Mechanism class: {mechanism_class}
+Indication: {indication}
+
+Source documents:
+{context}

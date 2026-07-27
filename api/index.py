@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -7,6 +9,7 @@ app = FastAPI(title="IndicationScope API")
 class ScanRequest(BaseModel):
     disease: str
     mechanism: str | None = None
+    persona: str = "academic"
 
 
 @app.get("/api/health")
@@ -16,15 +19,16 @@ def health():
 
 @app.post("/api/scan")
 def scan(body: ScanRequest):
+    # TODO: replace mock with pipeline.run(body.disease, body.mechanism, body.persona)
     return {
-        "disease": body.disease,
-        "mechanism": body.mechanism,
-        "results": [
-            {
-                "drug": "Example Drug A",
-                "evidence_score": 0.87,
-                "sources": ["PubMed:12345678", "ClinicalTrials:NCT0000001"],
-                "summary": "Stub result — real extraction not yet implemented.",
-            }
-        ],
+        "query": {
+            "disease": body.disease,
+            "mechanism": body.mechanism,
+            "persona": body.persona,
+        },
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "candidates": [],
+        "previously_attempted": [],
+        "trial_count": 0,
+        "publication_count": 0,
     }
