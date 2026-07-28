@@ -111,3 +111,6 @@ cache.db
 .DS_Store
 *.local
 .vercel
+
+.vercel
+.env*

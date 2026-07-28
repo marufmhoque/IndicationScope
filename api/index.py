@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
+from mangum import Mangum
 from pydantic import BaseModel
 
 app = FastAPI(title="IndicationScope API")
+handler = Mangum(app, lifespan="off")
 
 
 class ScanRequest(BaseModel):

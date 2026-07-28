@@ -4,3 +4,4 @@ biopython
 anthropic
 pandas
 python-dotenv
+mangum
