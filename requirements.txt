@@ -1,6 +1,7 @@
 fastapi
 httpx
 biopython
+beautifulsoup4
 anthropic
 pandas
 python-dotenv
