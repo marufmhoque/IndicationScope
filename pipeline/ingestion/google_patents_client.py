@@ -1,8 +1,9 @@
-"""Google Patents web scraper client for patent data retrieval."""
+"""Google Patents client using the patents.google.com JSON query endpoint."""
 
+import html
 import logging
+import re
 import time
-from urllib.parse import quote
 
 import httpx
 
@@ -12,41 +13,46 @@ _RATE_LIMIT_RPS = 2
 _MIN_INTERVAL = 1.0 / _RATE_LIMIT_RPS
 _last_call: float = 0.0
 
-GOOGLE_PATENTS_BASE = "https://patents.google.com"
-GOOGLE_PATENTS_SEARCH = f"{GOOGLE_PATENTS_BASE}/?q="
+_MAX_PAGES = 5
+_TAG_RE = re.compile(r"<[^>]+>")
+
+GOOGLE_PATENTS_QUERY = "https://patents.google.com/xhr/query"
 
 
 class GooglePatentsClient:
-    def __init__(self, base_url: str = GOOGLE_PATENTS_BASE):
+    """Reads the same JSON endpoint the Google Patents web UI calls.
+
+    The HTML at patents.google.com is a JavaScript shell with no patent
+    content in it, so the results are fetched from /xhr/query instead.
+    """
+
+    def __init__(self, base_url: str = GOOGLE_PATENTS_QUERY):
         self.base_url = base_url
 
     def fetch_patents(self, disease: str) -> list[dict]:
-        """Return patent records matching a disease query from Google Patents."""
-        search_url = f"{GOOGLE_PATENTS_SEARCH}{quote(disease)}"
-
+        """Return patent records matching a disease query."""
         results: list[dict] = []
-        page = 0
-        max_pages = 5  # Limit to avoid excessive scraping
 
-        while page < max_pages:
+        for page in range(_MAX_PAGES):
+            query = f"q={disease}" + (f"&page={page}" if page else "")
+
             self._rate_limit()
-            url = search_url + (f"&page={page}" if page > 0 else "")
-
-            resp = self._get_with_backoff(url)
-            if resp.status_code != 200:
-                logger.warning("Google Patents returned %d for disease=%r", resp.status_code, disease)
+            resp = self._get_with_backoff({"url": query})
+            if resp is None:
                 break
 
-            # Parse results from the page
-            # Google Patents uses JavaScript rendering, so this is a best-effort extraction
-            patents = self._parse_search_results(resp.text)
+            body = resp.json().get("results", {})
+            patents = self._parse(body)
             if not patents:
                 break
 
             results.extend(patents)
-            logger.debug("Fetched page %d: %d patents, total so far: %d", page, len(patents), len(results))
+            logger.debug(
+                "Fetched page %d: %d patents, total so far: %d", page, len(patents), len(results)
+            )
 
-            page += 1
+            if page + 1 >= body.get("total_num_pages", 0):
+                break
 
         logger.info(
             "Google Patents fetch complete — disease=%r count=%d",
@@ -58,48 +64,36 @@ class GooglePatentsClient:
     # Internals
     # ------------------------------------------------------------------
 
+    @classmethod
+    def _parse(cls, body: dict) -> list[dict]:
+        """Flatten the clustered result payload into patent records."""
+        records: list[dict] = []
+        for cluster in body.get("cluster", []):
+            for item in cluster.get("result", []):
+                patent = item.get("patent", {})
+                number = patent.get("publication_number", "")
+                if not number:
+                    continue
+                records.append(
+                    {
+                        "patent_number": number,
+                        "patent_title": cls._clean(patent.get("title", "")),
+                        "patent_abstract": cls._clean(patent.get("snippet", "")),
+                        "patent_date": patent.get("publication_date", ""),
+                        "filing_date": patent.get("filing_date", ""),
+                        "priority_date": patent.get("priority_date", ""),
+                        "assignee": patent.get("assignee", ""),
+                        "inventor": patent.get("inventor", ""),
+                        "url": f"https://patents.google.com/patent/{number}/en",
+                        "source": "google_patents",
+                    }
+                )
+        return records
+
     @staticmethod
-    def _parse_search_results(html: str) -> list[dict]:
-        """Extract patent data from search results HTML."""
-        try:
-            from bs4 import BeautifulSoup
-        except ImportError:
-            logger.error("BeautifulSoup4 is required for Google Patents scraping")
-            return []
-
-        soup = BeautifulSoup(html, "html.parser")
-        results: list[dict] = []
-
-        # Google Patents uses data attributes and dynamic content
-        # This is a fallback extraction from visible HTML
-        patent_items = soup.find_all("div", class_="result")
-        if not patent_items:
-            # Try alternative selectors
-            patent_items = soup.find_all("div", attrs={"class": lambda x: x and "item" in x})
-
-        for item in patent_items[:100]:  # Limit to 100 per page
-            try:
-                # Try to extract patent data
-                title_elem = item.find("a", class_="title")
-                abstract_elem = item.find("p", class_="abstract")
-                id_elem = item.find("span", class_="patent-id")
-
-                patent_data = {
-                    "patent_number": id_elem.get_text(strip=True) if id_elem else "",
-                    "patent_title": title_elem.get_text(strip=True) if title_elem else "",
-                    "patent_abstract": abstract_elem.get_text(strip=True) if abstract_elem else "",
-                    "patent_date": "",
-                    "assignee": "",
-                    "url": title_elem["href"] if title_elem and "href" in title_elem.attrs else "",
-                }
-
-                if patent_data.get("patent_number"):
-                    results.append(patent_data)
-            except (AttributeError, KeyError, TypeError):
-                # Skip items that don't have required structure
-                continue
-
-        return results
+    def _clean(text: str) -> str:
+        """Strip the <b> match highlighting and decode HTML entities."""
+        return html.unescape(_TAG_RE.sub("", text)).strip()
 
     @staticmethod
     def _rate_limit() -> None:
@@ -109,24 +103,37 @@ class GooglePatentsClient:
             time.sleep(_MIN_INTERVAL - elapsed)
         _last_call = time.monotonic()
 
-    def _get_with_backoff(self, url: str, max_retries: int = 3) -> httpx.Response:
+    def _get_with_backoff(self, params: dict, max_retries: int = 3) -> httpx.Response | None:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         }
         delay = 1.0
         for attempt in range(max_retries):
             try:
-                resp = httpx.get(url, headers=headers, timeout=30, follow_redirects=True)
-                if resp.status_code == 429:
-                    logger.warning("Rate-limited by Google Patents — retrying in %.1fs (attempt %d)", delay, attempt + 1)
+                resp = httpx.get(self.base_url, params=params, headers=headers, timeout=30)
+                # /xhr/query is undocumented and throttles by IP, answering 503
+                # once a burst trips its limit. Both codes mean "back off".
+                if resp.status_code in (429, 503):
+                    logger.warning(
+                        "Throttled by Google Patents (HTTP %d) — retrying in %.1fs (attempt %d)",
+                        resp.status_code, delay, attempt + 1,
+                    )
                     time.sleep(delay)
                     delay = min(delay * 2, 60)
                     continue
                 resp.raise_for_status()
                 return resp
-            except httpx.TimeoutException:
-                logger.warning("Timeout from Google Patents — retrying in %.1fs (attempt %d)", delay, attempt + 1)
+            except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+                logger.warning(
+                    "Google Patents request failed (%s) — retrying in %.1fs (attempt %d)",
+                    type(exc).__name__, delay, attempt + 1,
+                )
                 time.sleep(delay)
                 delay = min(delay * 2, 60)
-        logger.error("Failed to fetch from Google Patents after %d retries", max_retries)
-        return httpx.Response(503)  # Return error response
+
+        logger.error(
+            "Google Patents unavailable after %d retries — likely IP throttling; "
+            "results will omit this source",
+            max_retries,
+        )
+        return None

@@ -28,8 +28,8 @@ class QueryCache:
 
     def get(self, query_hash: str) -> dict | None:
         row = self._execute(
-            "SELECT data FROM cache WHERE query_hash = ?", (query_hash,)
-        ).fetchone()
+            "SELECT data FROM cache WHERE query_hash = ?", (query_hash,), fetch=True
+        )
         if row:
             logger.debug("Cache hit: %s…", query_hash[:8])
             return json.loads(row[0])
@@ -59,12 +59,25 @@ class QueryCache:
             commit=True,
         )
 
-    def _execute(self, sql: str, params: tuple = (), *, commit: bool = False):
+    def _execute(
+        self,
+        sql: str,
+        params: tuple = (),
+        *,
+        commit: bool = False,
+        fetch: bool = False,
+    ):
+        """Run SQL against the cache DB.
+
+        Rows must be fetched before the connection closes, so `fetch=True`
+        returns the first row rather than the cursor.
+        """
         conn = sqlite3.connect(self._path)
         try:
             cur = conn.execute(sql, params)
+            row = cur.fetchone() if fetch else None
             if commit:
                 conn.commit()
-            return cur
+            return row
         finally:
             conn.close()
