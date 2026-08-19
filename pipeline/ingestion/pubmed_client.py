@@ -56,19 +56,40 @@ class PubMedClient:
             medline = article.get("MedlineCitation", {})
             art = medline.get("Article", {})
 
-            # TODO: full abstract extraction (ArticleAbstract → AbstractText list)
-            # TODO: MeSH heading extraction
-            # TODO: publication type list
+            abstract_texts = art.get("Abstract", {}).get("AbstractText", [])
+            abstract = " ".join(str(t) for t in abstract_texts)
+
+            mesh_terms = [
+                str(heading.get("DescriptorName", ""))
+                for heading in (medline.get("MeshHeadingList") or [])
+            ]
+
+            journal_issue = art.get("Journal", {}).get("JournalIssue", {})
+            pub_date = self._format_pub_date(journal_issue.get("PubDate", {}))
+
             results.append(
                 {
                     "pmid": str(medline.get("PMID", "")),
                     "title": str(art.get("ArticleTitle", "")),
-                    "abstract": "",
-                    "mesh_terms": [],
+                    "abstract": abstract,
+                    "mesh_terms": mesh_terms,
                     "mechanism_class": [],
                     "condition_normalized": [],
-                    "pub_date": "",
-                    "publication_type": [],
+                    "pub_date": pub_date,
+                    "publication_type": [str(p) for p in art.get("PublicationTypeList", [])],
                 }
             )
         return results
+
+    @staticmethod
+    def _format_pub_date(pub_date: dict) -> str:
+        year = pub_date.get("Year")
+        if year:
+            parts = [str(year)]
+            if pub_date.get("Month"):
+                parts.append(str(pub_date["Month"]))
+            if pub_date.get("Day"):
+                parts.append(str(pub_date["Day"]))
+            return "-".join(parts)
+        # Date-range records (e.g. "2023 Winter") use MedlineDate instead of Year/Month/Day.
+        return str(pub_date.get("MedlineDate", ""))

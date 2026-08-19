@@ -11,6 +11,11 @@ _RATE_LIMIT_RPS = 5
 _MIN_INTERVAL = 1.0 / _RATE_LIMIT_RPS
 _last_call: float = 0.0
 
+# A common condition (e.g. "diabetes") can match tens of thousands of studies.
+# Scoring runs within an interactive request, so the result set is capped —
+# this is a deliberate scope limit, not a page-size accident.
+_MAX_RESULTS = 300
+
 CT_GOV_BASE = "https://clinicaltrials.gov/api/v2/studies"
 
 
@@ -42,6 +47,11 @@ class ClinicalTrialsClient:
             studies = body.get("studies", [])
             results.extend(studies)
             logger.debug("Fetched page: %d studies, total so far: %d", len(studies), len(results))
+
+            if len(results) >= _MAX_RESULTS:
+                results = results[:_MAX_RESULTS]
+                logger.info("ClinicalTrials fetch capped at %d results", _MAX_RESULTS)
+                break
 
             next_token = body.get("nextPageToken")
             if not next_token:
