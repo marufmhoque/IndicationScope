@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 
 from pipeline.normalization.entity_extraction import extract_mechanisms_batch
@@ -87,8 +88,14 @@ def build_matrix(trials: list[dict], publications: list[dict], indication: str) 
 # ------------------------------------------------------------------
 
 def _cell_for(cells: dict[str, dict], mechanism_class: str, indication: str) -> dict:
-    if mechanism_class not in cells:
-        cells[mechanism_class] = {
+    """Group by a canonicalized key so e.g. "orexin-2 receptor agonist" and
+    "orexin 2 receptor agonist" land in the same cell — independent
+    per-item extraction calls otherwise phrase the same mechanism
+    differently often enough to fragment obviously-identical results.
+    The first-seen raw phrasing is kept as the display label."""
+    key = _canonical_key(mechanism_class)
+    if key not in cells:
+        cells[key] = {
             "mechanism_class": mechanism_class,
             "indication": indication,
             "trial_count_by_status": {},
@@ -101,7 +108,15 @@ def _cell_for(cells: dict[str, dict], mechanism_class: str, indication: str) -> 
             "supporting_nct_ids": [],
             "_recent_pub_count": 0,
         }
-    return cells[mechanism_class]
+    return cells[key]
+
+
+def _canonical_key(mechanism_class: str) -> str:
+    text = mechanism_class.lower()
+    text = re.sub(r"[-_]", " ", text)
+    text = re.sub(r"\breceptor\b", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def _build_extraction_items(trials: list[dict], publications: list[dict]) -> list[dict]:
@@ -109,9 +124,12 @@ def _build_extraction_items(trials: list[dict], publications: list[dict]) -> lis
     get some representation even when the trial list alone exceeds the cap."""
     items: list[dict] = []
 
+    # Only the first intervention name: the extraction prompt is written for
+    # a single item and returns one JSON object. Joining multiple drug names
+    # invites the model to return one object per drug instead, breaking parsing.
     trial_candidates = [t for t in trials if t["intervention_names"] and t["nct_id"]]
     for trial in trial_candidates[:_MAX_TRIAL_ITEMS]:
-        text = "; ".join(trial["intervention_names"][:3])
+        text = trial["intervention_names"][0]
         items.append({"source_id": f"nct:{trial['nct_id']}", "text": text})
 
     pub_candidates = [p for p in publications if p.get("pmid")]
