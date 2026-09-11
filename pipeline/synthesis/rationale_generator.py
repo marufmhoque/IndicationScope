@@ -86,8 +86,11 @@ def generate_rationale(cell: dict, abstracts: list[str], trial_summaries: list[s
 # ------------------------------------------------------------------
 
 def _build_context(abstracts: list[str], trial_summaries: list[str]) -> str:
-    parts = [f"[Publication {i}]\n{text}" for i, text in enumerate(abstracts, 1)]
-    parts += [f"[Trial {i}]\n{text}" for i, text in enumerate(trial_summaries, 1)]
+    """Sources are expected to carry their own PMID/NCT identifier, so they are
+    labelled by kind only — numbering them invites the model to cite the
+    position ("Publication 1") instead of the ID the prompt asks for."""
+    parts = [f"[Publication]\n{text}" for text in abstracts]
+    parts += [f"[Trial]\n{text}" for text in trial_summaries]
     return "\n\n".join(parts)
 
 

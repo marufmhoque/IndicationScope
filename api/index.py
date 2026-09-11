@@ -177,13 +177,17 @@ def _attach_context(candidates: list[dict], trials: list[dict], publications: li
     trials_by_nct = {t["nct_id"]: t for t in trials if t["nct_id"]}
 
     for cell in candidates:
+        # Each source carries its own identifier: the synthesis prompt requires
+        # every claim to cite a PMID or NCT ID, and without them in the text the
+        # model can only cite the position ("Publication 1"), which is untraceable.
         abstracts = [
-            pubs_by_pmid[pmid]["abstract"] or pubs_by_pmid[pmid]["title"]
+            f"PMID {pmid}: {pubs_by_pmid[pmid]['abstract'] or pubs_by_pmid[pmid]['title']}"
             for pmid in cell["supporting_pmids"]
             if pmid in pubs_by_pmid
         ][:5]
         trial_summaries = [
-            f"{t['brief_title']}. Status: {t['status_class']}. {t['brief_summary'][:300]}"
+            f"{nct_id}: {t['brief_title']}. Status: {t['status_class']}. "
+            f"{t['brief_summary'][:300]}"
             for nct_id in cell["supporting_nct_ids"]
             if (t := trials_by_nct.get(nct_id))
         ][:5]
