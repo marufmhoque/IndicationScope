@@ -10,6 +10,8 @@ white_space_score =
 
 from __future__ import annotations
 
+from pipeline.scoring.matrix_builder import UNCLASSIFIED
+
 # Publication count at which rationale_strength saturates to 1.0.
 _PUB_COUNT_SATURATION = 20
 
@@ -47,20 +49,32 @@ def score_cell(cell: dict) -> float:
     return max(0.0, min(1.0, score))
 
 
-def rank_cells(cells: list[dict]) -> tuple[list[dict], list[dict]]:
+def rank_cells(cells: list[dict]) -> tuple[list[dict], list[dict], dict | None]:
     """
-    Score every cell, then split and sort into (candidates, previously_attempted).
+    Score every cell, then split into (candidates, previously_attempted, unclassified).
 
-    Cells with has_prior_failure=True go to previously_attempted. Both lists
-    are sorted by white_space_score descending.
+    Cells with has_prior_failure=True go to previously_attempted; both lists are
+    sorted by white_space_score descending.
+
+    The "Unclassified" bucket is pulled out of both. It holds everything the
+    classification budget didn't reach, so it accumulates the most records and
+    would otherwise rank first — presenting "we didn't look at these" as the
+    strongest opportunity. It is returned separately rather than dropped: when
+    no API key is configured every record lands there, and silently discarding
+    it would render an empty page with no explanation.
     """
     for cell in cells:
         cell["white_space_score"] = score_cell(cell)
 
-    candidates = [c for c in cells if not c.get("has_prior_failure")]
-    previously_attempted = [c for c in cells if c.get("has_prior_failure")]
+    unclassified = next(
+        (c for c in cells if c.get("mechanism_class") == UNCLASSIFIED), None
+    )
+    classified = [c for c in cells if c.get("mechanism_class") != UNCLASSIFIED]
+
+    candidates = [c for c in classified if not c.get("has_prior_failure")]
+    previously_attempted = [c for c in classified if c.get("has_prior_failure")]
 
     candidates.sort(key=lambda c: c["white_space_score"], reverse=True)
     previously_attempted.sort(key=lambda c: c["white_space_score"], reverse=True)
 
-    return candidates, previously_attempted
+    return candidates, previously_attempted, unclassified

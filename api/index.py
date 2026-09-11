@@ -10,15 +10,24 @@ from dotenv import load_dotenv
 # environments (Vercel), which inject real env vars instead of this file.
 load_dotenv(".env.local")
 
+from config import SYNTHESIS_TOP_N
 from fastapi import APIRouter, FastAPI
 from mangum import Mangum
 from pydantic import BaseModel
 
 from pipeline.ingestion.orchestrator import IngestionOrchestrator
+from pipeline.normalization.entity_aggregator import (
+    aggregate_organizations,
+    aggregate_researchers,
+)
 from pipeline.normalization.trial_normalizer import normalize_trial
 from pipeline.scoring.matrix_builder import build_matrix
 from pipeline.scoring.white_space_score import rank_cells
-from pipeline.synthesis.rationale_generator import generate_rationale
+from pipeline.synthesis.rationale_generator import (
+    DEFAULT_PERSONA,
+    generate_failure_analysis,
+    generate_rationale,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +41,9 @@ _SCAN_BUDGET_S = 45
 # Below this much remaining time, skip LLM classification entirely — counts and
 # scores still come back, everything just lands in "Unclassified".
 _MIN_EXTRACTION_S = 12
-# Rough extraction throughput (8 workers, ~1.5s per call). Only used to size the
-# item cap against the remaining budget.
-_ITEMS_PER_SECOND = 5
-
-# Only the top candidates carry synthesis context back to the client, to keep the
-# response small. These are the ones the UI requests rationales for.
-_CONTEXT_TOP_N = 5
+# Measured extraction throughput (16 workers, ~0.85s per call). Only used to
+# size the item cap against the remaining budget.
+_ITEMS_PER_SECOND = 14
 
 # Constructed on first use, not at import. Module-scope construction meant any
 # init failure (e.g. a read-only filesystem) became a boot-time 500 on every route.
@@ -55,10 +60,12 @@ def get_ingestion() -> IngestionOrchestrator:
 class ScanRequest(BaseModel):
     disease: str
     mechanism: str | None = None
-    persona: str = "academic"
+    # Captured for the response echo only. Persona is a synthesis lens, so it
+    # deliberately does not affect ingestion, scoring, or what is searched.
+    persona: str = DEFAULT_PERSONA
 
 
-class RationaleRequest(BaseModel):
+class SynthesisRequest(BaseModel):
     """Stateless: the client passes back the context /api/scan gave it.
 
     Re-deriving context server-side would mean re-running ingestion, and the
@@ -67,6 +74,7 @@ class RationaleRequest(BaseModel):
 
     mechanism_class: str
     indication: str
+    persona: str = DEFAULT_PERSONA
     supporting_pmids: list[str] = []
     supporting_nct_ids: list[str] = []
     abstracts: list[str] = []
@@ -89,21 +97,26 @@ def scan(body: ScanRequest):
     ct = sources["clinical_trials"]
     pubmed = sources["pubmed"]
     publications = pubmed["records"]
+    patents = sources["google_patents"]["records"] + sources["uspto"]["records"]
 
     trials = [normalize_trial(t) for t in ct["records"]]
 
-    cells = build_matrix(
+    matrix = build_matrix(
         trials,
         publications,
         indication=body.disease,
         max_extraction_items=_extraction_budget(started),
     )
-    candidates, previously_attempted = rank_cells(cells)
-    _attach_context(candidates[:_CONTEXT_TOP_N], trials, publications)
+    candidates, previously_attempted, unclassified = rank_cells(matrix["cells"])
+
+    # Both sections can request synthesis, so both need their source text.
+    _attach_context(candidates[:SYNTHESIS_TOP_N], trials, publications)
+    _attach_context(previously_attempted[:SYNTHESIS_TOP_N], trials, publications)
 
     logger.info(
-        "Scan complete — disease=%r candidates=%d elapsed=%.1fs",
-        body.disease, len(candidates), time.monotonic() - started,
+        "Scan complete — disease=%r candidates=%d prior=%d elapsed=%.1fs",
+        body.disease, len(candidates), len(previously_attempted),
+        time.monotonic() - started,
     )
 
     return {
@@ -115,34 +128,48 @@ def scan(body: ScanRequest):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "candidates": candidates,
         "previously_attempted": previously_attempted,
+        # What the classification budget didn't reach. Surfaced rather than
+        # ranked: it holds the most records and would otherwise top the list,
+        # presenting "not looked at" as the strongest opportunity.
+        "unclassified": _unclassified_summary(unclassified),
+        "coverage": matrix["coverage"],
+        # Ranked across both kinds, so ask for enough that academic sponsors
+        # survive an industry-heavy field; the UI caps each kind separately.
+        "key_organizations": aggregate_organizations(trials, patents, limit=30),
+        "key_researchers": aggregate_researchers(publications),
         # *_count is the true number of matches; *_analyzed is what was actually
-        # classified. They differ by orders of magnitude for common diseases, so
-        # the UI must not present the total as though it were all analysed.
+        # ingested. They differ by orders of magnitude for common diseases.
         "trial_count": ct["total"],
         "trials_analyzed": len(trials),
         "publication_count": pubmed["total"],
         "publications_analyzed": len(publications),
         "patent_count": sources["uspto"]["total"] + sources["google_patents"]["total"],
-        "patents_analyzed": (
-            len(sources["uspto"]["records"]) + len(sources["google_patents"]["records"])
-        ),
+        "patents_analyzed": len(patents),
     }
 
 
 @router.post("/rationale")
-def rationale(body: RationaleRequest):
-    """Synthesise one cell's rationale.
+def rationale(body: SynthesisRequest):
+    """Synthesise one cell's white-space rationale.
 
     Split out of /scan because synthesis is the single most expensive step and
     would otherwise push a scan past the platform's function timeout.
     """
-    cell = {
-        "mechanism_class": body.mechanism_class,
-        "indication": body.indication,
-        "supporting_pmids": body.supporting_pmids,
-        "supporting_nct_ids": body.supporting_nct_ids,
-    }
-    return generate_rationale(cell, body.abstracts, body.trial_summaries)
+    return generate_rationale(
+        _cell_from(body), body.abstracts, body.trial_summaries, persona=body.persona
+    )
+
+
+@router.post("/failure-analysis")
+def failure_analysis(body: SynthesisRequest):
+    """Explain why prior attempts at one mechanism-indication pair failed.
+
+    Runs on demand rather than during the scan: most failed mechanisms are never
+    expanded, and generating for all of them would cost a call each for nothing.
+    """
+    return generate_failure_analysis(
+        _cell_from(body), body.abstracts, body.trial_summaries, persona=body.persona
+    )
 
 
 # Vercel rewrites preserve the original request path, so in production the
@@ -156,6 +183,15 @@ app.include_router(router, prefix="/tools/indicationscope/api")
 # Internals
 # ------------------------------------------------------------------
 
+def _cell_from(body: SynthesisRequest) -> dict:
+    return {
+        "mechanism_class": body.mechanism_class,
+        "indication": body.indication,
+        "supporting_pmids": body.supporting_pmids,
+        "supporting_nct_ids": body.supporting_nct_ids,
+    }
+
+
 def _extraction_budget(started: float) -> int:
     """How many records classification can afford with the time left."""
     remaining = _SCAN_BUDGET_S - (time.monotonic() - started)
@@ -168,27 +204,52 @@ def _extraction_budget(started: float) -> int:
     return max(0, int((remaining - 5) * _ITEMS_PER_SECOND))
 
 
-def _attach_context(candidates: list[dict], trials: list[dict], publications: list[dict]) -> None:
-    """Attach the source text each candidate would need for synthesis."""
-    if not candidates:
+def _unclassified_summary(cell: dict | None) -> dict | None:
+    """Report the unclassified remainder as counts, not as a pseudo-candidate."""
+    if not cell:
+        return None
+    return {
+        "trial_count": sum(cell["trial_count_by_status"].values()),
+        "publication_count": cell["publication_count"],
+    }
+
+
+def _attach_context(cells: list[dict], trials: list[dict], publications: list[dict]) -> None:
+    """Attach the source text each cell would need for synthesis."""
+    if not cells:
         return
 
     pubs_by_pmid = {p["pmid"]: p for p in publications if p.get("pmid")}
     trials_by_nct = {t["nct_id"]: t for t in trials if t["nct_id"]}
 
-    for cell in candidates:
-        # Each source carries its own identifier: the synthesis prompt requires
-        # every claim to cite a PMID or NCT ID, and without them in the text the
-        # model can only cite the position ("Publication 1"), which is untraceable.
+    for cell in cells:
+        # Each source carries its own identifier: the prompts require every
+        # claim to cite a PMID or NCT ID, and without them in the text the model
+        # can only cite the position ("Publication 1"), which is untraceable.
         abstracts = [
             f"PMID {pmid}: {pubs_by_pmid[pmid]['abstract'] or pubs_by_pmid[pmid]['title']}"
             for pmid in cell["supporting_pmids"]
             if pmid in pubs_by_pmid
         ][:5]
         trial_summaries = [
-            f"{nct_id}: {t['brief_title']}. Status: {t['status_class']}. "
-            f"{t['brief_summary'][:300]}"
+            _trial_summary(nct_id, t)
             for nct_id in cell["supporting_nct_ids"]
             if (t := trials_by_nct.get(nct_id))
         ][:5]
         cell["context"] = {"abstracts": abstracts, "trial_summaries": trial_summaries}
+
+
+def _trial_summary(nct_id: str, trial: dict) -> str:
+    """One trial as a citable line.
+
+    why_stopped is included verbatim when present — it is the only record of why
+    a trial actually stopped, and the failure analysis has nothing to work from
+    without it.
+    """
+    parts = [f"{nct_id}: {trial['brief_title']}.", f"Status: {trial['status_class']}."]
+    if trial.get("why_stopped"):
+        parts.append(f"Reason stopped: {trial['why_stopped']}.")
+    if trial.get("lead_sponsor"):
+        parts.append(f"Sponsor: {trial['lead_sponsor']}.")
+    parts.append(trial["brief_summary"][:300])
+    return " ".join(parts).strip()

@@ -1,0 +1,8 @@
+Write for a translational researcher deciding what is worth investigating.
+
+Prioritise: the biological plausibility of the mechanism against this indication,
+the specific pathway or target implicated, what the publication record clusters
+around, and where the mechanistic gap in the literature actually sits. Name the
+pathway explicitly where the sources support it. Treat an absence of trials as a
+research opening only if the biology in the sources justifies it; otherwise say
+the rationale is unsupported.

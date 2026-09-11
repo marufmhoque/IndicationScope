@@ -2,12 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-
-const PERSONAS = [
-  { value: "academic", label: "Academic" },
-  { value: "startup", label: "Startup" },
-  { value: "diligence", label: "Due Diligence" },
-] as const;
+import { PERSONAS } from "../lib/types";
 
 export default function SearchForm() {
   const router = useRouter();
@@ -54,7 +49,12 @@ export default function SearchForm() {
       </div>
 
       <div className="space-y-2">
-        <label className="block text-sm font-medium text-gray-300">Persona</label>
+        <label className="block text-sm font-medium text-gray-300">
+          Analysis lens{" "}
+          <span className="text-gray-500 font-normal">
+            (changes how findings are framed, not what is searched)
+          </span>
+        </label>
         <div className="flex gap-2">
           {PERSONAS.map((p) => (
             <button
@@ -71,6 +71,9 @@ export default function SearchForm() {
             </button>
           ))}
         </div>
+        <p className="text-xs text-gray-500">
+          {PERSONAS.find((p) => p.value === persona)?.blurb}
+        </p>
       </div>
 
       <button

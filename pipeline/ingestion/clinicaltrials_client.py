@@ -17,9 +17,25 @@ _RATE_LIMIT_RPS = 5
 _MIN_INTERVAL = 1.0 / _RATE_LIMIT_RPS
 _last_call: float = 0.0
 
-# Studies fetched for mechanism analysis. The reported total is the real count,
-# not this — see the module docstring.
-_SAMPLE_SIZE = 100
+# Studies fetched for analysis. The reported total is the real count, not this —
+# see the module docstring.
+_SAMPLE_SIZE = 200
+
+# Request only the fields actually consumed. Unmasked, 200 studies is ~5.4MB of
+# JSON; masked it is ~213KB and arrives faster than 100 unmasked ones did. The
+# response keeps the same nested protocolSection shape, so normalize_trial is
+# unaffected. Any field added here must also be read there to be worth fetching.
+_FIELDS = "|".join([
+    "NCTId",
+    "BriefTitle",
+    "BriefSummary",
+    "OverallStatus",
+    "WhyStopped",
+    "Condition",
+    "InterventionName",
+    "LeadSponsorName",
+    "HasResults",
+])
 
 CT_GOV_BASE = "https://clinicaltrials.gov/api/v2/studies"
 
@@ -35,6 +51,7 @@ class ClinicalTrialsClient:
             "pageSize": _SAMPLE_SIZE,
             "format": "json",
             "countTotal": "true",
+            "fields": _FIELDS,
         }
         if mechanism:
             params["query.intr"] = mechanism

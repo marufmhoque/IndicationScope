@@ -1,90 +1,77 @@
-interface MatrixCell {
-  mechanism_class: string;
-  indication: string;
-  trial_count_by_status: Record<string, number>;
-  publication_count: number;
-  publication_growth_rate: number;
-  white_space_score: number;
-  has_prior_failure: boolean;
-  rationale: string | null;
-  supporting_pmids: string[];
-  supporting_nct_ids: string[];
-  // Only the top candidates carry the source text /api/rationale needs. Its
-  // absence means no rationale is coming, which the card must not present as
-  // still loading.
-  context?: { abstracts: string[]; trial_summaries: string[] };
-}
+import type { MatrixCell } from "../lib/types";
 
 interface Props {
   cell: MatrixCell;
-  variant?: "candidate" | "attempted";
 }
 
-export default function CandidateCard({ cell, variant = "candidate" }: Props) {
-  const borderColor = variant === "candidate" ? "border-indigo-800" : "border-amber-800";
-  const badgeColor =
-    variant === "candidate"
-      ? "bg-indigo-900 text-indigo-300"
-      : "bg-amber-900 text-amber-300";
+export default function CandidateCard({ cell }: Props) {
   const scorePercent = Math.round(cell.white_space_score * 100);
-  // Source text present means a rationale request is in flight for this card.
-  const ctx = cell.context;
-  const rationalePending =
-    !!ctx && (ctx.abstracts.length > 0 || ctx.trial_summaries.length > 0);
+  const trialTotal = Object.values(cell.trial_count_by_status).reduce((a, b) => a + b, 0);
+
+  // A rationale is generated on demand after the scan, so "no rationale yet" and
+  // "no rationale possible" are different states and the card must not claim the
+  // wrong one — it previously promised synthesis that was never coming.
+  const rationalePossible =
+    !!cell.context &&
+    (cell.context.abstracts.length > 0 || cell.context.trial_summaries.length > 0);
 
   return (
-    <div className={`rounded-xl border ${borderColor} bg-gray-900 p-5 space-y-3`}>
+    <div className="rounded-xl border border-indigo-800 bg-gray-900 p-5 space-y-3">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-xs text-gray-500 uppercase tracking-wider">Mechanism class</p>
           <p className="font-semibold text-white">{cell.mechanism_class || "—"}</p>
         </div>
-        {variant === "candidate" && (
-          <div className="shrink-0 text-right">
-            <p className="text-xs text-gray-500 uppercase tracking-wider">Score</p>
-            <p className="text-2xl font-bold text-indigo-400">{scorePercent}</p>
-          </div>
-        )}
-        {variant === "attempted" && (
-          <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium ${badgeColor}`}>
-            Prior failure
-          </span>
-        )}
+        <div className="shrink-0 text-right">
+          <p className="text-xs text-gray-500 uppercase tracking-wider">Score</p>
+          <p className="text-2xl font-bold text-indigo-400">{scorePercent}</p>
+        </div>
       </div>
 
       <div className="flex gap-6 text-sm text-gray-400">
         <span>
-          <span className="font-medium text-gray-200">{cell.publication_count}</span> publications
+          <span className="font-medium text-gray-200">{cell.publication_count}</span>{" "}
+          publications
         </span>
         <span>
-          <span className="font-medium text-gray-200">
-            {Object.values(cell.trial_count_by_status).reduce((a, b) => a + b, 0)}
-          </span>{" "}
-          trials
+          <span className="font-medium text-gray-200">{trialTotal}</span>{" "}
+          {trialTotal === 1 ? "trial" : "trials"}
         </span>
       </div>
 
       {cell.rationale ? (
         <p className="text-sm text-gray-300 leading-relaxed">{cell.rationale}</p>
-      ) : rationalePending ? (
-        <p className="text-sm text-gray-600 italic">Rationale pending synthesis…</p>
+      ) : rationalePossible ? (
+        <p className="text-sm text-gray-600 italic">Synthesizing rationale…</p>
       ) : (
         <p className="text-sm text-gray-600 italic">
-          Not among the top-ranked candidates, so no rationale was synthesized.
+          Not enough source text was retained to synthesize a rationale.
         </p>
       )}
 
       {(cell.supporting_pmids.length > 0 || cell.supporting_nct_ids.length > 0) && (
         <div className="flex flex-wrap gap-1.5 pt-1">
           {cell.supporting_pmids.slice(0, 4).map((id) => (
-            <span key={id} className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-400">
+            <a
+              key={id}
+              href={`https://pubmed.ncbi.nlm.nih.gov/${id}/`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-400 hover:text-gray-200"
+            >
               PMID:{id}
-            </span>
+            </a>
           ))}
           {cell.supporting_nct_ids.slice(0, 4).map((id) => (
-            <span key={id} className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-400">
+            <a
+              key={id}
+              href={`https://clinicaltrials.gov/study/${id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-400 hover:text-gray-200"
+            >
               {id}
-            </span>
+            </a>
           ))}
         </div>
       )}

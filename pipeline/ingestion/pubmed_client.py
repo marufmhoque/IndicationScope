@@ -22,8 +22,13 @@ logger = logging.getLogger(__name__)
 
 # Records actually fetched for mechanism analysis; the reported total is the
 # real esearch count, not this.
-_SAMPLE_SIZE = 60
+_SAMPLE_SIZE = 200
 _TIMEOUT = 20
+
+# Authors kept per article. Consortium papers can list hundreds, which would
+# dominate the cached payload for no analytical gain — the leading names are
+# what the researcher ranking needs.
+_MAX_AUTHORS = 10
 
 # NCBI asks callers to identify themselves so it can contact you about misuse.
 _TOOL = "indicationscope"
@@ -112,9 +117,31 @@ class PubMedClient:
                         self._text(p)
                         for p in article.findall(".//PublicationTypeList/PublicationType")
                     ],
+                    "authors": self._authors(article),
                 }
             )
         return results
+
+    @classmethod
+    def _authors(cls, article) -> list[dict]:
+        """Extract leading authors as {name, affiliation}.
+
+        Entries without a LastName (collective/consortium authors) are skipped —
+        they carry no individual attribution.
+        """
+        authors: list[dict] = []
+        for person in article.findall(".//AuthorList/Author")[:_MAX_AUTHORS]:
+            last = person.findtext("LastName")
+            if not last:
+                continue
+            fore = person.findtext("ForeName") or person.findtext("Initials") or ""
+            authors.append(
+                {
+                    "name": f"{fore} {last}".strip(),
+                    "affiliation": cls._text(person.find("AffiliationInfo/Affiliation")),
+                }
+            )
+        return authors
 
     @staticmethod
     def _text(element) -> str:

@@ -13,9 +13,10 @@ _RATE_LIMIT_RPS = 2
 _MIN_INTERVAL = 1.0 / _RATE_LIMIT_RPS
 _last_call: float = 0.0
 
-# One page, one attempt. The endpoint throttles aggressively (503) and burning
-# retries on backoff cost ~7s for zero results inside a 60s function budget.
-_MAX_PAGES = 2
+# Best-effort depth. The endpoint throttles aggressively (503), so each page is
+# one attempt with a short timeout — burning retries on backoff cost ~7s for zero
+# results inside a 60s function budget. Pagination stops at the first failure.
+_MAX_PAGES = 5
 _TIMEOUT_SECONDS = 5
 _TAG_RE = re.compile(r"<[^>]+>")
 

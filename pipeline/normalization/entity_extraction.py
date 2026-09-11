@@ -20,19 +20,36 @@ from pathlib import Path
 import anthropic
 
 from config import EXTRACTION_MODEL
+from pipeline.ingestion.cache import MechanismCache
 
 logger = logging.getLogger(__name__)
 
 _PROMPT_PATH = Path(__file__).parents[1] / "synthesis" / "prompts" / "extraction_prompt.txt"
 _MAX_ITEMS = 80
-_MAX_WORKERS = 8
+_MAX_WORKERS = 16
 _MAX_TOKENS = 200
 _TEXT_LIMIT = 1000
+
+# Constructed on first use, not at import — module-scope construction of a
+# filesystem-backed object is what once turned a read-only disk into a
+# boot-time 500 on every route.
+_cache: MechanismCache | None = None
+
+
+def _mechanism_cache() -> MechanismCache:
+    global _cache
+    if _cache is None:
+        _cache = MechanismCache()
+    return _cache
 
 
 def extract_mechanisms_batch(items: list[dict]) -> dict[str, dict]:
     """
     Classify mechanism class for a list of {source_id, text} items.
+
+    source_id must be a stable identity for the thing being classified (a
+    normalised drug name, or a PMID) rather than a per-query id, because results
+    are cached under it and reused by later searches.
 
     Returns a dict keyed by source_id -> {mechanism_class, target, drug_class}.
     Items with blank text, and any beyond _MAX_ITEMS, are skipped.
@@ -41,27 +58,34 @@ def extract_mechanisms_batch(items: list[dict]) -> dict[str, dict]:
     if not usable:
         return {}
 
+    cache = _mechanism_cache()
+    results: dict[str, dict] = dict(cache.get_many([it["source_id"] for it in usable]))
+    pending = [it for it in usable if it["source_id"] not in results]
+    if not pending:
+        logger.info("All %d items served from the mechanism cache", len(usable))
+        return results
+
     client = _client()
     if client is None:
         logger.warning(
             "ANTHROPIC_API_KEY not set — skipping mechanism extraction for %d items",
-            len(usable),
+            len(pending),
         )
-        return {}
+        return results
 
     prompt_template = _load_prompt()
-    results: dict[str, dict] = {}
+    fresh: dict[str, dict] = {}
 
     with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
         futures = {
             executor.submit(_extract_one, client, prompt_template, it["text"]): it["source_id"]
-            for it in usable
+            for it in pending
         }
         api_error_count = 0
         for future in as_completed(futures):
             source_id = futures[future]
             try:
-                results[source_id] = future.result()
+                fresh[source_id] = future.result()
             except anthropic.APIError as exc:
                 # Expected/recoverable (rate limit, billing, timeout) — one
                 # line per batch instead of a full traceback per item.
@@ -74,9 +98,13 @@ def extract_mechanisms_batch(items: list[dict]) -> dict[str, dict]:
             logger.warning(
                 "%d/%d extraction calls failed with an API error (rate limit, billing, or "
                 "timeout) — those items fall back to Unclassified",
-                api_error_count, len(usable),
+                api_error_count, len(pending),
             )
 
+    # Only cache real classifications; a null result may just mean the call failed,
+    # and caching that would make a transient outage permanent.
+    cache.set_many({k: v for k, v in fresh.items() if v.get("mechanism_class")})
+    results.update(fresh)
     return results
 
 
@@ -100,7 +128,20 @@ def _extract_one(client: anthropic.Anthropic, prompt_template: str, text: str) -
         max_tokens=_MAX_TOKENS,
         messages=[{"role": "user", "content": prompt}],
     )
-    return _parse_json_object(response.content[0].text)
+    return _parse_json_object(_response_text(response))
+
+
+def _response_text(response) -> str:
+    """Return the first text block's content.
+
+    Not content[0]: models with thinking enabled put a ThinkingBlock first, so
+    indexing blindly raises AttributeError. Block order is a model property, not
+    something this code should depend on.
+    """
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            return block.text
+    return ""
 
 
 def _parse_json_object(raw: str) -> dict:

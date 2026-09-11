@@ -1,93 +1,15 @@
 "use client";
 
 import { useSearchParams, useRouter } from "next/navigation";
-import { useEffect, useState, Suspense } from "react";
+import { useCallback, useEffect, useState, Suspense } from "react";
 import ResultsMatrix from "../components/ResultsMatrix";
 import PersonaToggle from "../components/PersonaToggle";
+import KeyPlayers from "../components/KeyPlayers";
+import FailureAccordion from "../components/FailureAccordion";
 import { apiUrl } from "../lib/paths";
+import type { ScanResponse } from "../lib/types";
 
-interface CellContext {
-  abstracts: string[];
-  trial_summaries: string[];
-}
-
-interface MatrixCell {
-  mechanism_class: string;
-  indication: string;
-  trial_count_by_status: Record<string, number>;
-  publication_count: number;
-  publication_growth_rate: number;
-  white_space_score: number;
-  has_prior_failure: boolean;
-  rationale: string | null;
-  supporting_pmids: string[];
-  supporting_nct_ids: string[];
-  // Present only on the top few candidates — the source text /api/rationale
-  // needs, sent back so synthesis doesn't have to re-run ingestion.
-  context?: CellContext;
-}
-
-interface ScanResponse {
-  query: { disease: string; mechanism: string | null; persona: string };
-  generated_at: string;
-  candidates: MatrixCell[];
-  previously_attempted: MatrixCell[];
-  // *_count is the true number of matches; *_analyzed is what was actually
-  // classified. They differ by orders of magnitude for common diseases.
-  trial_count: number;
-  trials_analyzed: number;
-  publication_count: number;
-  publications_analyzed: number;
-  patent_count: number;
-  patents_analyzed: number;
-}
-
-/**
- * Fetch a rationale per candidate and merge each into state as it arrives.
- * Failures are swallowed on purpose: a rationale is enrichment, and the card
- * already renders a "pending synthesis" state without one.
- */
-function loadRationales(
-  scan: ScanResponse,
-  isCancelled: () => boolean,
-  setData: React.Dispatch<React.SetStateAction<ScanResponse | null>>,
-) {
-  scan.candidates.forEach((cell, index) => {
-    const ctx = cell.context;
-    if (!ctx || (ctx.abstracts.length === 0 && ctx.trial_summaries.length === 0)) return;
-
-    fetch(apiUrl("/api/rationale"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        mechanism_class: cell.mechanism_class,
-        indication: scan.query.disease,
-        supporting_pmids: cell.supporting_pmids,
-        supporting_nct_ids: cell.supporting_nct_ids,
-        abstracts: ctx.abstracts,
-        trial_summaries: ctx.trial_summaries,
-      }),
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((out) => {
-        if (!out?.rationale || isCancelled()) return;
-        setData((prev) => {
-          if (!prev) return prev;
-          const candidates = [...prev.candidates];
-          candidates[index] = {
-            ...candidates[index],
-            rationale: out.rationale,
-            supporting_pmids: out.supporting_pmids ?? candidates[index].supporting_pmids,
-            supporting_nct_ids: out.supporting_nct_ids ?? candidates[index].supporting_nct_ids,
-          };
-          return { ...prev, candidates };
-        });
-      })
-      .catch(() => {
-        /* enrichment only — leave the card in its pending state */
-      });
-  });
-}
+type Tab = "whitespace" | "attempted" | "players";
 
 function ResultsContent() {
   const params = useSearchParams();
@@ -96,22 +18,30 @@ function ResultsContent() {
   const disease = params.get("disease") ?? "";
   const mechanism = params.get("mechanism") ?? undefined;
   const [persona, setPersona] = useState(params.get("persona") ?? "academic");
+  const [tab, setTab] = useState<Tab>("whitespace");
 
   const [status, setStatus] = useState<"loading" | "done" | "error">("loading");
-  const [data, setData] = useState<ScanResponse | null>(null);
+  // The scan is kept immutable and rationales live beside it, keyed by
+  // mechanism. Merging synthesis back into the scan meant a persona switch had
+  // to surgically undo it; this way switching just clears a map.
+  const [scan, setScan] = useState<ScanResponse | null>(null);
+  const [rationales, setRationales] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
+  // Persona is deliberately NOT a dependency here. It only reframes synthesis,
+  // so re-ingesting on a lens switch would re-run every source fetch and every
+  // classification to arrive at exactly the same evidence.
   useEffect(() => {
     if (!disease) {
       router.push("/");
       return;
     }
 
-    // Guards against a superseded query (e.g. a persona switch mid-flight)
-    // overwriting newer results — rationale calls in particular run for a while.
     let cancelled = false;
-
     setStatus("loading");
+    setScan(null);
+    setRationales({});
+
     fetch(apiUrl("/api/scan"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -123,12 +53,8 @@ function ResultsContent() {
       })
       .then((json) => {
         if (cancelled) return;
-        setData(json);
+        setScan(json);
         setStatus("done");
-        // Synthesis is deliberately not part of /api/scan — it would push the
-        // request past the serverless function timeout. Cards render without a
-        // rationale and fill in as each one lands.
-        loadRationales(json, () => cancelled, setData);
       })
       .catch((e) => {
         if (cancelled) return;
@@ -139,17 +65,60 @@ function ResultsContent() {
     return () => {
       cancelled = true;
     };
-  }, [disease, mechanism, persona, router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [disease, mechanism, router]);
+
+  // Synthesis runs after the scan, and again on a lens switch. It is separate
+  // from /api/scan because it is the most expensive step and would otherwise
+  // push a scan past the serverless function timeout.
+  useEffect(() => {
+    if (!scan) return;
+
+    let cancelled = false;
+    setRationales({});
+
+    scan.candidates.forEach((cell) => {
+      const ctx = cell.context;
+      if (!ctx || (ctx.abstracts.length === 0 && ctx.trial_summaries.length === 0)) return;
+
+      fetch(apiUrl("/api/rationale"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mechanism_class: cell.mechanism_class,
+          indication: scan.query.disease,
+          persona,
+          supporting_pmids: cell.supporting_pmids,
+          supporting_nct_ids: cell.supporting_nct_ids,
+          abstracts: ctx.abstracts,
+          trial_summaries: ctx.trial_summaries,
+        }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((out) => {
+          if (!out?.rationale || cancelled) return;
+          setRationales((prev) => ({ ...prev, [cell.mechanism_class]: out.rationale }));
+        })
+        .catch(() => {
+          /* enrichment only — the card renders without it */
+        });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [scan, persona]);
+
+  const newSearch = useCallback(() => router.push("/"), [router]);
 
   if (!disease) return null;
 
   return (
-    <div className="min-h-screen px-4 py-12 max-w-3xl mx-auto space-y-8">
-      {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-4">
+    <div className="min-h-screen px-4 py-12 max-w-4xl mx-auto space-y-8">
+      <div className="flex items-start justify-between flex-wrap gap-4">
         <div>
           <button
-            onClick={() => router.push("/")}
+            onClick={newSearch}
             className="text-sm text-gray-500 hover:text-gray-300 mb-2 block"
           >
             ← New search
@@ -164,61 +133,157 @@ function ResultsContent() {
         <PersonaToggle value={persona} onChange={setPersona} />
       </div>
 
-      {/* Loading */}
       {status === "loading" && (
         <div className="space-y-3">
           <div className="h-2 w-full rounded-full bg-gray-800 overflow-hidden">
             <div className="h-full bg-indigo-600 rounded-full animate-pulse w-1/2" />
           </div>
           <p className="text-sm text-gray-500 text-center">
-            Scanning ClinicalTrials.gov and PubMed…
+            Scanning trials, literature, and patents…
           </p>
         </div>
       )}
 
-      {/* Error */}
       {status === "error" && (
         <div className="rounded-lg border border-red-800 bg-red-950 p-4 text-red-300 text-sm">
           {error ?? "An unexpected error occurred. Please try again."}
         </div>
       )}
 
-      {/* Results */}
-      {status === "done" && data && (
+      {status === "done" && scan && (
         <>
-          <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-gray-400 border-b border-gray-800 pb-4">
-            <span>
-              <span className="font-medium text-white">
-                {data.trial_count.toLocaleString()}
-              </span>{" "}
-              trials found
-              <span className="text-gray-600">
-                {" "}
-                · {data.trials_analyzed.toLocaleString()} analyzed
-              </span>
-            </span>
-            <span>
-              <span className="font-medium text-white">
-                {data.publication_count.toLocaleString()}
-              </span>{" "}
-              publications
-              <span className="text-gray-600">
-                {" "}
-                · {data.publications_analyzed.toLocaleString()} analyzed
-              </span>
-            </span>
-            <span className="ml-auto text-gray-600">
-              {new Date(data.generated_at).toLocaleString()}
-            </span>
+          <SourceCounts scan={scan} />
+
+          <div className="flex gap-1 border-b border-gray-800">
+            <TabButton active={tab === "whitespace"} onClick={() => setTab("whitespace")}>
+              White Space <Count>{scan.candidates.length}</Count>
+            </TabButton>
+            <TabButton active={tab === "attempted"} onClick={() => setTab("attempted")}>
+              Previously Attempted <Count>{scan.previously_attempted.length}</Count>
+            </TabButton>
+            <TabButton active={tab === "players"} onClick={() => setTab("players")}>
+              Key Players{" "}
+              <Count>{scan.key_organizations.length + scan.key_researchers.length}</Count>
+            </TabButton>
           </div>
-          <ResultsMatrix
-            candidates={data.candidates}
-            previouslyAttempted={data.previously_attempted}
-          />
+
+          {tab === "whitespace" && (
+            <ResultsMatrix
+              candidates={scan.candidates.map((c) => ({
+                ...c,
+                rationale: rationales[c.mechanism_class] ?? null,
+              }))}
+            />
+          )}
+
+          {tab === "attempted" && (
+            <FailureAccordion
+              cells={scan.previously_attempted}
+              indication={scan.query.disease}
+              persona={persona}
+            />
+          )}
+
+          {tab === "players" && (
+            <KeyPlayers
+              organizations={scan.key_organizations}
+              researchers={scan.key_researchers}
+            />
+          )}
+
+          <CoverageNote scan={scan} />
         </>
       )}
     </div>
   );
+}
+
+/**
+ * True match totals alongside what was actually ingested. Showing only the
+ * total would imply the analysis covered all of it.
+ */
+function SourceCounts({ scan }: { scan: ScanResponse }) {
+  const items = [
+    { label: "trials", total: scan.trial_count, analyzed: scan.trials_analyzed },
+    {
+      label: "publications",
+      total: scan.publication_count,
+      analyzed: scan.publications_analyzed,
+    },
+    { label: "patents", total: scan.patent_count, analyzed: scan.patents_analyzed },
+  ];
+
+  return (
+    <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-gray-400 border-b border-gray-800 pb-4">
+      {items.map((i) => (
+        <span key={i.label}>
+          <span className="font-medium text-white">{i.total.toLocaleString()}</span>{" "}
+          {i.label}
+          <span className="text-gray-600"> · {i.analyzed.toLocaleString()} ingested</span>
+        </span>
+      ))}
+      <span className="ml-auto text-gray-600">
+        {new Date(scan.generated_at).toLocaleString()}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * How much of the ingested sample was actually classified. At a constrained
+ * budget this is a fraction, and omitting it would present partial mechanism
+ * coverage as a complete landscape.
+ */
+function CoverageNote({ scan }: { scan: ScanResponse }) {
+  const c = scan.coverage;
+  const unclassified = scan.unclassified;
+  const hasRemainder =
+    !!unclassified && (unclassified.trial_count > 0 || unclassified.publication_count > 0);
+
+  return (
+    <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-4 text-xs text-gray-500 space-y-1">
+      <p>
+        <span className="text-gray-400">Mechanism coverage:</span> {c.drugs_classified} of{" "}
+        {c.distinct_drugs.toLocaleString()} distinct interventions classified, accounting
+        for {c.trials_classified} of {c.trials_total} ingested trials.
+      </p>
+      {hasRemainder && (
+        <p>
+          <span className="text-gray-400">Not yet classified:</span>{" "}
+          {unclassified!.trial_count} trials and {unclassified!.publication_count}{" "}
+          publications. These count toward the totals above but aren&apos;t attributed to
+          a mechanism, so they are not ranked.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
+        active
+          ? "border-indigo-500 text-white"
+          : "border-transparent text-gray-500 hover:text-gray-300"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Count({ children }: { children: React.ReactNode }) {
+  return <span className="ml-1 text-xs text-gray-600">({children})</span>;
 }
 
 export default function ResultsPage() {
