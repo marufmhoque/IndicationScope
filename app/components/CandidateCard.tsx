@@ -9,6 +9,10 @@ interface MatrixCell {
   rationale: string | null;
   supporting_pmids: string[];
   supporting_nct_ids: string[];
+  // Only the top candidates carry the source text /api/rationale needs. Its
+  // absence means no rationale is coming, which the card must not present as
+  // still loading.
+  context?: { abstracts: string[]; trial_summaries: string[] };
 }
 
 interface Props {
@@ -23,6 +27,10 @@ export default function CandidateCard({ cell, variant = "candidate" }: Props) {
       ? "bg-indigo-900 text-indigo-300"
       : "bg-amber-900 text-amber-300";
   const scorePercent = Math.round(cell.white_space_score * 100);
+  // Source text present means a rationale request is in flight for this card.
+  const ctx = cell.context;
+  const rationalePending =
+    !!ctx && (ctx.abstracts.length > 0 || ctx.trial_summaries.length > 0);
 
   return (
     <div className={`rounded-xl border ${borderColor} bg-gray-900 p-5 space-y-3`}>
@@ -58,8 +66,12 @@ export default function CandidateCard({ cell, variant = "candidate" }: Props) {
 
       {cell.rationale ? (
         <p className="text-sm text-gray-300 leading-relaxed">{cell.rationale}</p>
-      ) : (
+      ) : rationalePending ? (
         <p className="text-sm text-gray-600 italic">Rationale pending synthesis…</p>
+      ) : (
+        <p className="text-sm text-gray-600 italic">
+          Not among the top-ranked candidates, so no rationale was synthesized.
+        </p>
       )}
 
       {(cell.supporting_pmids.length > 0 || cell.supporting_nct_ids.length > 0) && (
