@@ -1,6 +1,5 @@
 fastapi
 httpx
-biopython
 anthropic
 python-dotenv
 mangum

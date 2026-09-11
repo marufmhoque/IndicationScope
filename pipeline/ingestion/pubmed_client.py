@@ -1,29 +1,39 @@
-"""PubMed client using Biopython Entrez.
+"""PubMed client using the NCBI E-utilities HTTP API directly.
+
+Deliberately not Biopython: its Entrez parser resolves DTDs against an on-disk
+cache, which fails on a read-only serverless filesystem — PubMed returned zero
+results in production while working locally. Plain httpx plus the stdlib XML
+parser has no filesystem dependency, and drops a heavy package from the
+deployment bundle.
 
 esearch reports the true match count while honouring a small retmax, so the
-headline number stays accurate while only a sample is efetch'd. Fetching the
-full record set was the slowest step in a scan and returned multi-MB of XML
-that was never used.
+headline number stays accurate while only a sample is fetched.
 """
 
 import logging
 import os
+import xml.etree.ElementTree as ET
 
-from Bio import Entrez
+import httpx
+
+from config import NCBI_BASE
 
 logger = logging.getLogger(__name__)
 
 # Records actually fetched for mechanism analysis; the reported total is the
 # real esearch count, not this.
 _SAMPLE_SIZE = 60
+_TIMEOUT = 20
+
+# NCBI asks callers to identify themselves so it can contact you about misuse.
+_TOOL = "indicationscope"
+_EMAIL = "indicationscope@example.com"
 
 
 class PubMedClient:
-    def __init__(self):
-        Entrez.email = "indicationscope@example.com"
-        api_key = os.getenv("NCBI_API_KEY")
-        if api_key:
-            Entrez.api_key = api_key
+    def __init__(self, base_url: str = NCBI_BASE):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = os.getenv("NCBI_API_KEY")
 
     def fetch_publications(self, disease: str) -> dict:
         """Return {"total": int, "records": list[dict]} for a disease query."""
@@ -43,69 +53,87 @@ class PubMedClient:
     # Internals
     # ------------------------------------------------------------------
 
+    def _params(self, **extra) -> dict:
+        params = {"db": "pubmed", "tool": _TOOL, "email": _EMAIL, **extra}
+        if self.api_key:
+            params["api_key"] = self.api_key
+        return params
+
     def _search(self, query: str) -> tuple[int, list[str]]:
         """Return (true match count, sampled PMIDs)."""
-        handle = Entrez.esearch(db="pubmed", term=query, retmax=_SAMPLE_SIZE)
-        result = Entrez.read(handle)
-        handle.close()
+        resp = httpx.get(
+            f"{self.base_url}/esearch.fcgi",
+            params=self._params(term=query, retmax=_SAMPLE_SIZE, retmode="json"),
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        result = resp.json().get("esearchresult", {})
         try:
-            total = int(result.get("Count", 0))
+            total = int(result.get("count", 0))
         except (TypeError, ValueError):
             total = 0
-        return total, result.get("IdList", [])
+        return total, result.get("idlist", [])
 
     def _fetch_records(self, pmids: list[str]) -> list[dict]:
         if not pmids:
             return []
 
-        handle = Entrez.efetch(
-            db="pubmed",
-            id=",".join(pmids),
-            rettype="xml",
-            retmode="xml",
+        resp = httpx.get(
+            f"{self.base_url}/efetch.fcgi",
+            params=self._params(id=",".join(pmids), retmode="xml"),
+            timeout=_TIMEOUT,
         )
-        raw = Entrez.read(handle)
-        handle.close()
+        resp.raise_for_status()
+        root = ET.fromstring(resp.text)
 
         results: list[dict] = []
-        for article in raw.get("PubmedArticle", []):
-            medline = article.get("MedlineCitation", {})
-            art = medline.get("Article", {})
-
-            abstract_texts = art.get("Abstract", {}).get("AbstractText", [])
-            abstract = " ".join(str(t) for t in abstract_texts)
-
-            mesh_terms = [
-                str(heading.get("DescriptorName", ""))
-                for heading in (medline.get("MeshHeadingList") or [])
-            ]
-
-            journal_issue = art.get("Journal", {}).get("JournalIssue", {})
-            pub_date = self._format_pub_date(journal_issue.get("PubDate", {}))
-
+        for article in root.findall(".//PubmedArticle"):
+            journal_issue = article.find(".//Article/Journal/JournalIssue")
             results.append(
                 {
-                    "pmid": str(medline.get("PMID", "")),
-                    "title": str(art.get("ArticleTitle", "")),
-                    "abstract": abstract,
-                    "mesh_terms": mesh_terms,
+                    "pmid": article.findtext(".//MedlineCitation/PMID", default=""),
+                    "title": self._text(article.find(".//Article/ArticleTitle")),
+                    "abstract": " ".join(
+                        self._text(seg)
+                        for seg in article.findall(".//Article/Abstract/AbstractText")
+                    ).strip(),
+                    "mesh_terms": [
+                        self._text(d)
+                        for d in article.findall(
+                            ".//MeshHeadingList/MeshHeading/DescriptorName"
+                        )
+                    ],
                     "mechanism_class": [],
                     "condition_normalized": [],
-                    "pub_date": pub_date,
-                    "publication_type": [str(p) for p in art.get("PublicationTypeList", [])],
+                    "pub_date": self._format_pub_date(
+                        journal_issue.find("PubDate") if journal_issue is not None else None
+                    ),
+                    "publication_type": [
+                        self._text(p)
+                        for p in article.findall(".//PublicationTypeList/PublicationType")
+                    ],
                 }
             )
         return results
 
     @staticmethod
-    def _format_pub_date(pub_date: dict) -> str:
-        year = pub_date.get("Year")
+    def _text(element) -> str:
+        """Flatten an element's text, including any nested inline markup."""
+        if element is None:
+            return ""
+        return "".join(element.itertext()).strip()
+
+    @staticmethod
+    def _format_pub_date(pub_date) -> str:
+        if pub_date is None:
+            return ""
+        year = pub_date.findtext("Year")
         if year:
-            parts = [str(year)]
-            if pub_date.get("Month"):
-                parts.append(str(pub_date["Month"]))
-            if pub_date.get("Day"):
-                parts.append(str(pub_date["Day"]))
+            parts = [year]
+            for field in ("Month", "Day"):
+                value = pub_date.findtext(field)
+                if value:
+                    parts.append(value)
             return "-".join(parts)
-        # Date-range records (e.g. "2023 Winter") use MedlineDate instead of Year/Month/Day.
-        return str(pub_date.get("MedlineDate", ""))
+        # Date-range records (e.g. "2023 Winter") use MedlineDate instead.
+        return pub_date.findtext("MedlineDate") or ""
