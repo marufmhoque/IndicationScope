@@ -1,4 +1,10 @@
-"""ClinicalTrials.gov v2 API client with pagination and rate limiting."""
+"""ClinicalTrials.gov v2 API client.
+
+Fetches one page of studies plus the *true* total. A common condition like
+"diabetes" matches tens of thousands of studies; paginating all of them blows the
+serverless time budget, and `countTotal` returns the real figure in the same
+request — so the count stays accurate while only a sample is analysed.
+"""
 
 import logging
 import time
@@ -11,10 +17,9 @@ _RATE_LIMIT_RPS = 5
 _MIN_INTERVAL = 1.0 / _RATE_LIMIT_RPS
 _last_call: float = 0.0
 
-# A common condition (e.g. "diabetes") can match tens of thousands of studies.
-# Scoring runs within an interactive request, so the result set is capped —
-# this is a deliberate scope limit, not a page-size accident.
-_MAX_RESULTS = 300
+# Studies fetched for mechanism analysis. The reported total is the real count,
+# not this — see the module docstring.
+_SAMPLE_SIZE = 100
 
 CT_GOV_BASE = "https://clinicaltrials.gov/api/v2/studies"
 
@@ -23,45 +28,29 @@ class ClinicalTrialsClient:
     def __init__(self, base_url: str = CT_GOV_BASE):
         self.base_url = base_url
 
-    def fetch_trials(self, disease: str, mechanism: str | None = None) -> list[dict]:
-        """Return all trial records matching disease (+optional mechanism)."""
+    def fetch_trials(self, disease: str, mechanism: str | None = None) -> dict:
+        """Return {"total": int, "records": list[dict]} for a disease query."""
         params: dict = {
             "query.cond": disease,
-            "pageSize": 100,
+            "pageSize": _SAMPLE_SIZE,
             "format": "json",
+            "countTotal": "true",
         }
         if mechanism:
             params["query.intr"] = mechanism
 
-        results: list[dict] = []
-        next_token: str | None = None
+        self._rate_limit()
+        resp = self._get_with_backoff(params)
+        body = resp.json()
 
-        while True:
-            if next_token:
-                params["pageToken"] = next_token
-
-            self._rate_limit()
-            resp = self._get_with_backoff(params)
-            body = resp.json()
-
-            studies = body.get("studies", [])
-            results.extend(studies)
-            logger.debug("Fetched page: %d studies, total so far: %d", len(studies), len(results))
-
-            if len(results) >= _MAX_RESULTS:
-                results = results[:_MAX_RESULTS]
-                logger.info("ClinicalTrials fetch capped at %d results", _MAX_RESULTS)
-                break
-
-            next_token = body.get("nextPageToken")
-            if not next_token:
-                break
+        records = body.get("studies", [])
+        total = body.get("totalCount", len(records))
 
         logger.info(
-            "ClinicalTrials fetch complete — disease=%r mechanism=%r count=%d",
-            disease, mechanism, len(results),
+            "ClinicalTrials fetch complete — disease=%r mechanism=%r total=%d sampled=%d",
+            disease, mechanism, total, len(records),
         )
-        return results
+        return {"total": total, "records": records}
 
     # ------------------------------------------------------------------
     # Internals
@@ -75,14 +64,16 @@ class ClinicalTrialsClient:
             time.sleep(_MIN_INTERVAL - elapsed)
         _last_call = time.monotonic()
 
-    def _get_with_backoff(self, params: dict, max_retries: int = 6) -> httpx.Response:
+    def _get_with_backoff(self, params: dict, max_retries: int = 3) -> httpx.Response:
         delay = 1.0
         for attempt in range(max_retries):
-            resp = httpx.get(self.base_url, params=params, timeout=30)
+            resp = httpx.get(self.base_url, params=params, timeout=20)
             if resp.status_code == 429:
-                logger.warning("Rate-limited by CT.gov — retrying in %.1fs (attempt %d)", delay, attempt + 1)
+                logger.warning(
+                    "Rate-limited by CT.gov — retrying in %.1fs (attempt %d)", delay, attempt + 1
+                )
                 time.sleep(delay)
-                delay = min(delay * 2, 60)
+                delay = min(delay * 2, 10)
                 continue
             resp.raise_for_status()
             return resp

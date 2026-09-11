@@ -4,6 +4,12 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { useEffect, useState, Suspense } from "react";
 import ResultsMatrix from "../components/ResultsMatrix";
 import PersonaToggle from "../components/PersonaToggle";
+import { apiUrl } from "../lib/paths";
+
+interface CellContext {
+  abstracts: string[];
+  trial_summaries: string[];
+}
 
 interface MatrixCell {
   mechanism_class: string;
@@ -16,6 +22,9 @@ interface MatrixCell {
   rationale: string | null;
   supporting_pmids: string[];
   supporting_nct_ids: string[];
+  // Present only on the top few candidates — the source text /api/rationale
+  // needs, sent back so synthesis doesn't have to re-run ingestion.
+  context?: CellContext;
 }
 
 interface ScanResponse {
@@ -23,8 +32,61 @@ interface ScanResponse {
   generated_at: string;
   candidates: MatrixCell[];
   previously_attempted: MatrixCell[];
+  // *_count is the true number of matches; *_analyzed is what was actually
+  // classified. They differ by orders of magnitude for common diseases.
   trial_count: number;
+  trials_analyzed: number;
   publication_count: number;
+  publications_analyzed: number;
+  patent_count: number;
+  patents_analyzed: number;
+}
+
+/**
+ * Fetch a rationale per candidate and merge each into state as it arrives.
+ * Failures are swallowed on purpose: a rationale is enrichment, and the card
+ * already renders a "pending synthesis" state without one.
+ */
+function loadRationales(
+  scan: ScanResponse,
+  isCancelled: () => boolean,
+  setData: React.Dispatch<React.SetStateAction<ScanResponse | null>>,
+) {
+  scan.candidates.forEach((cell, index) => {
+    const ctx = cell.context;
+    if (!ctx || (ctx.abstracts.length === 0 && ctx.trial_summaries.length === 0)) return;
+
+    fetch(apiUrl("/api/rationale"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mechanism_class: cell.mechanism_class,
+        indication: scan.query.disease,
+        supporting_pmids: cell.supporting_pmids,
+        supporting_nct_ids: cell.supporting_nct_ids,
+        abstracts: ctx.abstracts,
+        trial_summaries: ctx.trial_summaries,
+      }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((out) => {
+        if (!out?.rationale || isCancelled()) return;
+        setData((prev) => {
+          if (!prev) return prev;
+          const candidates = [...prev.candidates];
+          candidates[index] = {
+            ...candidates[index],
+            rationale: out.rationale,
+            supporting_pmids: out.supporting_pmids ?? candidates[index].supporting_pmids,
+            supporting_nct_ids: out.supporting_nct_ids ?? candidates[index].supporting_nct_ids,
+          };
+          return { ...prev, candidates };
+        });
+      })
+      .catch(() => {
+        /* enrichment only — leave the card in its pending state */
+      });
+  });
 }
 
 function ResultsContent() {
@@ -45,8 +107,12 @@ function ResultsContent() {
       return;
     }
 
+    // Guards against a superseded query (e.g. a persona switch mid-flight)
+    // overwriting newer results — rationale calls in particular run for a while.
+    let cancelled = false;
+
     setStatus("loading");
-    fetch("/api/scan", {
+    fetch(apiUrl("/api/scan"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ disease, mechanism: mechanism || null, persona }),
@@ -56,13 +122,23 @@ function ResultsContent() {
         return r.json() as Promise<ScanResponse>;
       })
       .then((json) => {
+        if (cancelled) return;
         setData(json);
         setStatus("done");
+        // Synthesis is deliberately not part of /api/scan — it would push the
+        // request past the serverless function timeout. Cards render without a
+        // rationale and fill in as each one lands.
+        loadRationales(json, () => cancelled, setData);
       })
       .catch((e) => {
+        if (cancelled) return;
         setError(String(e));
         setStatus("error");
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [disease, mechanism, persona, router]);
 
   if (!disease) return null;
@@ -95,7 +171,7 @@ function ResultsContent() {
             <div className="h-full bg-indigo-600 rounded-full animate-pulse w-1/2" />
           </div>
           <p className="text-sm text-gray-500 text-center">
-            Scanning ClinicalTrials.gov and PubMed… this may take up to 2 minutes.
+            Scanning ClinicalTrials.gov and PubMed…
           </p>
         </div>
       )}
@@ -110,12 +186,26 @@ function ResultsContent() {
       {/* Results */}
       {status === "done" && data && (
         <>
-          <div className="flex gap-6 text-sm text-gray-400 border-b border-gray-800 pb-4">
+          <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-gray-400 border-b border-gray-800 pb-4">
             <span>
-              <span className="font-medium text-white">{data.trial_count}</span> trials indexed
+              <span className="font-medium text-white">
+                {data.trial_count.toLocaleString()}
+              </span>{" "}
+              trials found
+              <span className="text-gray-600">
+                {" "}
+                · {data.trials_analyzed.toLocaleString()} analyzed
+              </span>
             </span>
             <span>
-              <span className="font-medium text-white">{data.publication_count}</span> publications
+              <span className="font-medium text-white">
+                {data.publication_count.toLocaleString()}
+              </span>{" "}
+              publications
+              <span className="text-gray-600">
+                {" "}
+                · {data.publications_analyzed.toLocaleString()} analyzed
+              </span>
             </span>
             <span className="ml-auto text-gray-600">
               {new Date(data.generated_at).toLocaleString()}

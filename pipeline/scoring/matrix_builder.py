@@ -15,14 +15,19 @@ _UNCLASSIFIED = "Unclassified"
 # Mechanism classification is LLM-based; a search can involve hundreds of
 # records, so only a capped subset is sent to the model per source. Records
 # beyond the cap still count toward totals, just filed under "Unclassified".
-_MAX_TRIAL_ITEMS = 40
-_MAX_PUB_ITEMS = 20
+_MAX_TRIAL_ITEMS = 25
+_MAX_PUB_ITEMS = 15
 
 _RECENT_YEARS = 3
 _FAILURE_STATUSES = frozenset(["COMPLETED_NEGATIVE", "TERMINATED"])
 
 
-def build_matrix(trials: list[dict], publications: list[dict], indication: str) -> list[dict]:
+def build_matrix(
+    trials: list[dict],
+    publications: list[dict],
+    indication: str,
+    max_extraction_items: int | None = None,
+) -> list[dict]:
     """
     Return a list of MatrixCell dicts, one per mechanism_class, aggregated
     from the given (already disease-filtered) trials and publications.
@@ -34,11 +39,23 @@ def build_matrix(trials: list[dict], publications: list[dict], indication: str) 
         indication: The disease this search was scoped to. Constant across
             all cells — mechanism_class is the axis that varies within a
             single search, not indication.
+        max_extraction_items: Hard cap on records sent to the LLM, used by the
+            caller's wall-clock guard to stay inside the serverless budget.
+            0 skips classification entirely — everything lands in
+            "Unclassified" but counts and scores are still returned.
 
     Returns:
         List of MatrixCell dicts (unsorted; caller applies scoring/ranking).
     """
-    mechanism_by_source = extract_mechanisms_batch(_build_extraction_items(trials, publications))
+    items = _build_extraction_items(trials, publications)
+    if max_extraction_items is not None:
+        if len(items) > max_extraction_items:
+            logger.info(
+                "Time budget: extracting %d of %d candidate items",
+                max_extraction_items, len(items),
+            )
+        items = items[:max_extraction_items]
+    mechanism_by_source = extract_mechanisms_batch(items)
 
     cells: dict[str, dict] = {}
     now_year = datetime.now(timezone.utc).year

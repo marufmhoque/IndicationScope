@@ -1,4 +1,10 @@
-"""PubMed client using Biopython Entrez."""
+"""PubMed client using Biopython Entrez.
+
+esearch reports the true match count while honouring a small retmax, so the
+headline number stays accurate while only a sample is efetch'd. Fetching the
+full record set was the slowest step in a scan and returned multi-MB of XML
+that was never used.
+"""
 
 import logging
 import os
@@ -7,7 +13,9 @@ from Bio import Entrez
 
 logger = logging.getLogger(__name__)
 
-_MAX_RESULTS = 500
+# Records actually fetched for mechanism analysis; the reported total is the
+# real esearch count, not this.
+_SAMPLE_SIZE = 60
 
 
 class PubMedClient:
@@ -17,26 +25,34 @@ class PubMedClient:
         if api_key:
             Entrez.api_key = api_key
 
-    def fetch_publications(self, disease: str) -> list[dict]:
-        """Return publication records for a disease query."""
-        pmids = self._search(disease)
+    def fetch_publications(self, disease: str) -> dict:
+        """Return {"total": int, "records": list[dict]} for a disease query."""
+        total, pmids = self._search(disease)
         if not pmids:
             logger.info("PubMed: no results for %r", disease)
-            return []
+            return {"total": total, "records": []}
 
         records = self._fetch_records(pmids)
-        logger.info("PubMed fetch complete — disease=%r count=%d", disease, len(records))
-        return records
+        logger.info(
+            "PubMed fetch complete — disease=%r total=%d sampled=%d",
+            disease, total, len(records),
+        )
+        return {"total": total, "records": records}
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _search(self, query: str) -> list[str]:
-        handle = Entrez.esearch(db="pubmed", term=query, retmax=_MAX_RESULTS)
+    def _search(self, query: str) -> tuple[int, list[str]]:
+        """Return (true match count, sampled PMIDs)."""
+        handle = Entrez.esearch(db="pubmed", term=query, retmax=_SAMPLE_SIZE)
         result = Entrez.read(handle)
         handle.close()
-        return result.get("IdList", [])
+        try:
+            total = int(result.get("Count", 0))
+        except (TypeError, ValueError):
+            total = 0
+        return total, result.get("IdList", [])
 
     def _fetch_records(self, pmids: list[str]) -> list[dict]:
         if not pmids:

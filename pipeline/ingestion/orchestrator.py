@@ -11,6 +11,12 @@ from .cache import QueryCache
 
 logger = logging.getLogger(__name__)
 
+_SOURCE_NAMES = ("pubmed", "clinical_trials", "uspto", "google_patents")
+
+
+def _empty_source() -> dict:
+    return {"total": 0, "records": []}
+
 
 class IngestionOrchestrator:
     def __init__(self):
@@ -21,11 +27,15 @@ class IngestionOrchestrator:
         self.cache = QueryCache()
 
     def fetch_all_sources(self, disease: str, mechanism: str | None = None) -> dict:
-        """Fetch data from all available sources in parallel."""
+        """Fetch from every source in parallel.
+
+        Each source returns {"total", "records"}: the true match count, and the
+        sample actually fetched for analysis. They differ by orders of magnitude
+        for common diseases — see the individual clients.
+        """
         query = {"disease": disease, "mechanism": mechanism}
         query_hash = QueryCache.make_hash(query)
 
-        # Check cache first
         cached = self.cache.get(query_hash)
         if cached:
             logger.info("Returning cached results for disease=%r", disease)
@@ -33,15 +43,9 @@ class IngestionOrchestrator:
 
         results = {
             "query": query,
-            "sources": {
-                "pubmed": [],
-                "clinical_trials": [],
-                "uspto": [],
-                "google_patents": [],
-            },
+            "sources": {name: _empty_source() for name in _SOURCE_NAMES},
         }
 
-        # Fetch from all sources in parallel
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {
                 executor.submit(self.pubmed.fetch_publications, disease): "pubmed",
@@ -58,20 +62,19 @@ class IngestionOrchestrator:
                     data = future.result()
                     results["sources"][source_name] = data
                     logger.info(
-                        "Fetched %d records from %s for disease=%r",
-                        len(data),
-                        source_name,
-                        disease,
+                        "Fetched %s for disease=%r — total=%d sampled=%d",
+                        source_name, disease, data["total"], len(data["records"]),
                     )
-                except Exception as e:
-                    logger.error("Failed to fetch from %s: %s", source_name, e)
-                    results["sources"][source_name] = []
+                except Exception as exc:
+                    # One dead source must not fail the scan; it degrades to zero.
+                    logger.error("Failed to fetch from %s: %s", source_name, exc)
+                    results["sources"][source_name] = _empty_source()
 
-        # Cache results
         self.cache.set(query_hash, results)
         logger.info(
-            "Ingestion complete for disease=%r — total sources: %d",
+            "Ingestion complete for disease=%r — %d/%d sources returned records",
             disease,
-            len([s for s in results["sources"].values() if s]),
+            len([s for s in results["sources"].values() if s["records"]]),
+            len(_SOURCE_NAMES),
         )
         return results

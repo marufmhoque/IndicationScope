@@ -2,7 +2,6 @@ fastapi
 httpx
 biopython
 anthropic
-pandas
 python-dotenv
 mangum
 uvicorn[standard]

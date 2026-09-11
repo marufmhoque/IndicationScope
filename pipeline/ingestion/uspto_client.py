@@ -29,15 +29,16 @@ class USPTOClient:
         self.base_url = base_url
         self.api_key = api_key or os.getenv("USPTO_API_KEY")
 
-    def fetch_patents(self, disease: str) -> list[dict]:
-        """Return patent application records matching a disease query."""
+    def fetch_patents(self, disease: str) -> dict:
+        """Return {"total": int, "records": list[dict]} for a disease query."""
         if not self.api_key:
             logger.warning(
                 "USPTO skipped — set USPTO_API_KEY (free key from https://data.uspto.gov/) to enable"
             )
-            return []
+            return {"total": 0, "records": []}
 
         results: list[dict] = []
+        total = 0
 
         for page in range(_MAX_PAGES):
             params = {
@@ -52,6 +53,7 @@ class USPTOClient:
                 break
 
             body = resp.json()
+            total = body.get("count", total)
             patents = self._parse(body)
             if not patents:
                 break
@@ -65,10 +67,10 @@ class USPTOClient:
                 break
 
         logger.info(
-            "USPTO fetch complete — disease=%r count=%d",
-            disease, len(results),
+            "USPTO fetch complete — disease=%r total=%d sampled=%d",
+            disease, total, len(results),
         )
-        return results
+        return {"total": total or len(results), "records": results}
 
     # ------------------------------------------------------------------
     # Internals

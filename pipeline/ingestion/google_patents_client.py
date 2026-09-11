@@ -13,7 +13,10 @@ _RATE_LIMIT_RPS = 2
 _MIN_INTERVAL = 1.0 / _RATE_LIMIT_RPS
 _last_call: float = 0.0
 
-_MAX_PAGES = 5
+# One page, one attempt. The endpoint throttles aggressively (503) and burning
+# retries on backoff cost ~7s for zero results inside a 60s function budget.
+_MAX_PAGES = 2
+_TIMEOUT_SECONDS = 5
 _TAG_RE = re.compile(r"<[^>]+>")
 
 GOOGLE_PATENTS_QUERY = "https://patents.google.com/xhr/query"
@@ -29,9 +32,10 @@ class GooglePatentsClient:
     def __init__(self, base_url: str = GOOGLE_PATENTS_QUERY):
         self.base_url = base_url
 
-    def fetch_patents(self, disease: str) -> list[dict]:
-        """Return patent records matching a disease query."""
+    def fetch_patents(self, disease: str) -> dict:
+        """Return {"total": int, "records": list[dict]} for a disease query."""
         results: list[dict] = []
+        total = 0
 
         for page in range(_MAX_PAGES):
             query = f"q={disease}" + (f"&page={page}" if page else "")
@@ -42,6 +46,7 @@ class GooglePatentsClient:
                 break
 
             body = resp.json().get("results", {})
+            total = body.get("total_num_results", total)
             patents = self._parse(body)
             if not patents:
                 break
@@ -55,10 +60,10 @@ class GooglePatentsClient:
                 break
 
         logger.info(
-            "Google Patents fetch complete — disease=%r count=%d",
-            disease, len(results),
+            "Google Patents fetch complete — disease=%r total=%d sampled=%d",
+            disease, total, len(results),
         )
-        return results
+        return {"total": total or len(results), "records": results}
 
     # ------------------------------------------------------------------
     # Internals
@@ -103,37 +108,48 @@ class GooglePatentsClient:
             time.sleep(_MIN_INTERVAL - elapsed)
         _last_call = time.monotonic()
 
-    def _get_with_backoff(self, params: dict, max_retries: int = 3) -> httpx.Response | None:
+    def _get_with_backoff(self, params: dict, max_retries: int = 1) -> httpx.Response | None:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         }
         delay = 1.0
         for attempt in range(max_retries):
+            is_last = attempt == max_retries - 1
             try:
-                resp = httpx.get(self.base_url, params=params, headers=headers, timeout=30)
+                resp = httpx.get(
+                    self.base_url, params=params, headers=headers, timeout=_TIMEOUT_SECONDS
+                )
                 # /xhr/query is undocumented and throttles by IP, answering 503
                 # once a burst trips its limit. Both codes mean "back off".
                 if resp.status_code in (429, 503):
+                    if is_last:
+                        logger.warning(
+                            "Throttled by Google Patents (HTTP %d) — giving up", resp.status_code
+                        )
+                        break
                     logger.warning(
                         "Throttled by Google Patents (HTTP %d) — retrying in %.1fs (attempt %d)",
                         resp.status_code, delay, attempt + 1,
                     )
                     time.sleep(delay)
-                    delay = min(delay * 2, 60)
+                    delay = min(delay * 2, 10)
                     continue
                 resp.raise_for_status()
                 return resp
             except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+                if is_last:
+                    logger.warning(
+                        "Google Patents request failed (%s) — giving up", type(exc).__name__
+                    )
+                    break
                 logger.warning(
                     "Google Patents request failed (%s) — retrying in %.1fs (attempt %d)",
                     type(exc).__name__, delay, attempt + 1,
                 )
                 time.sleep(delay)
-                delay = min(delay * 2, 60)
+                delay = min(delay * 2, 10)
 
-        logger.error(
-            "Google Patents unavailable after %d retries — likely IP throttling; "
-            "results will omit this source",
-            max_retries,
+        logger.info(
+            "Google Patents unavailable (likely IP throttling) — results omit this source"
         )
         return None
