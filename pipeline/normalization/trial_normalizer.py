@@ -9,7 +9,7 @@ def normalize_trial(study: dict) -> dict:
     """
     Flatten a raw CT.gov v2 study object (fields nested under protocolSection)
     into: nct_id, brief_title, brief_summary, intervention_names, conditions,
-    status_class, lead_sponsor, why_stopped.
+    status_class, lead_sponsor, why_stopped, phases.
     """
     protocol = study.get("protocolSection", {})
     ident = protocol.get("identificationModule", {})
@@ -18,6 +18,7 @@ def normalize_trial(study: dict) -> dict:
     arms = protocol.get("armsInterventionsModule", {})
     description = protocol.get("descriptionModule", {})
     sponsors = protocol.get("sponsorCollaboratorsModule", {})
+    design = protocol.get("designModule", {})
 
     intervention_names = [
         i.get("name", "") for i in arms.get("interventions", []) if i.get("name")
@@ -42,4 +43,8 @@ def normalize_trial(study: dict) -> dict:
         "status_class": status_class,
         "why_stopped": why_stopped,
         "lead_sponsor": sponsors.get("leadSponsor", {}).get("name", ""),
+        # Absent on observational studies and "NA" on non-phased interventional
+        # ones. Availability swings 46-87% by disease, so an empty list is a
+        # real category the phase breakdown must show, not a value to drop.
+        "phases": design.get("phases", []),
     }

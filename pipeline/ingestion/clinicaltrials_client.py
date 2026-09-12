@@ -30,6 +30,7 @@ _FIELDS = "|".join([
     "BriefTitle",
     "BriefSummary",
     "OverallStatus",
+    "Phase",
     "WhyStopped",
     "Condition",
     "InterventionName",

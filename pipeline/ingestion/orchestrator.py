@@ -13,6 +13,11 @@ logger = logging.getLogger(__name__)
 
 _SOURCE_NAMES = ("pubmed", "clinical_trials", "uspto", "google_patents")
 
+# Not a source of records — a per-year count series for the momentum chart.
+# Runs alongside the sources so its handful of small requests costs no extra
+# wall-clock time.
+_TREND_KEY = "publication_trend"
+
 
 def _empty_source() -> dict:
     return {"total": 0, "records": []}
@@ -44,9 +49,10 @@ class IngestionOrchestrator:
         results = {
             "query": query,
             "sources": {name: _empty_source() for name in _SOURCE_NAMES},
+            _TREND_KEY: {"years": {}, "partial_year": 0},
         }
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=5) as executor:
             futures = {
                 executor.submit(self.pubmed.fetch_publications, disease): "pubmed",
                 executor.submit(
@@ -54,12 +60,16 @@ class IngestionOrchestrator:
                 ): "clinical_trials",
                 executor.submit(self.uspto.fetch_patents, disease): "uspto",
                 executor.submit(self.google_patents.fetch_patents, disease): "google_patents",
+                executor.submit(self.pubmed.fetch_year_counts, disease): _TREND_KEY,
             }
 
             for future in as_completed(futures):
                 source_name = futures[future]
                 try:
                     data = future.result()
+                    if source_name == _TREND_KEY:
+                        results[_TREND_KEY] = data
+                        continue
                     results["sources"][source_name] = data
                     logger.info(
                         "Fetched %s for disease=%r — total=%d sampled=%d",
@@ -68,7 +78,8 @@ class IngestionOrchestrator:
                 except Exception as exc:
                     # One dead source must not fail the scan; it degrades to zero.
                     logger.error("Failed to fetch from %s: %s", source_name, exc)
-                    results["sources"][source_name] = _empty_source()
+                    if source_name != _TREND_KEY:
+                        results["sources"][source_name] = _empty_source()
 
         self.cache.set(query_hash, results)
         logger.info(

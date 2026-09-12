@@ -1,8 +1,8 @@
 // Shared shapes for the /api/scan response.
 //
 // These mirror the Python response in api/index.py — when a field changes there,
-// it changes here. Previously MatrixCell was redeclared in three components,
-// which meant a backend change could leave two of them silently wrong.
+// it changes here. MatrixCell was once redeclared in three components, which
+// meant a backend change could leave two of them silently wrong.
 
 export const PERSONAS = [
   {
@@ -30,13 +30,31 @@ export interface CellContext {
   trial_summaries: string[];
 }
 
+/** Why a cell scored what it did — shown in the score legend. */
+export interface ScoreComponents {
+  literature_support: number;
+  max_support: number;
+  evidence: number;
+  openness: number;
+  active_trials: number;
+  total_trials: number;
+  failure_penalty: number;
+}
+
 export interface MatrixCell {
   mechanism_class: string;
   indication: string;
   trial_count_by_status: Record<string, number>;
+  phase_counts: Record<string, number>;
+  drug_class: string | null;
+  /** Treatment modality, derived from drug_class. */
+  pillar: string | null;
   publication_count: number;
-  publication_growth_rate: number;
+  /** Abstracts matching this mechanism across the whole sample. */
+  literature_support: number;
+  recent_publication_share: number;
   white_space_score: number;
+  score_components?: ScoreComponents;
   has_prior_failure: boolean;
   rationale: string | null;
   supporting_pmids: string[];
@@ -45,10 +63,7 @@ export interface MatrixCell {
   context?: CellContext;
 }
 
-/**
- * How much of the landscape was actually classified. At a constrained budget
- * this is a fraction, not the whole, and the UI has to say so.
- */
+/** How much of the corpus was classified, once ingested. */
 export interface Coverage {
   distinct_drugs: number;
   drugs_attempted: number;
@@ -57,7 +72,39 @@ export interface Coverage {
   trials_classified: number;
   publications_total: number;
   publications_classified: number;
+  abstracts_indexed: number;
   extraction_budget: number;
+}
+
+/**
+ * How much of each corpus was ingested at all. Ranges from ~2% (type 2
+ * diabetes) to 100% (rare indications) — the difference the UI must convey.
+ */
+export interface SourceSampling {
+  ingested: number;
+  total: number;
+  fraction: number;
+}
+
+export interface Sampling {
+  trials: SourceSampling;
+  publications: SourceSampling;
+}
+
+/**
+ * Counts sum to more than `total_trials`: a PHASE1|PHASE2 trial lands in both
+ * buckets, so the totals travel alongside rather than being inferred.
+ */
+export interface PhaseDistribution {
+  counts: Record<string, number>;
+  phased_trials: number;
+  total_trials: number;
+}
+
+export interface PublicationTrend {
+  years: Record<string, number>;
+  /** Always incomplete; never plotted as a decline. */
+  partial_year: number;
 }
 
 export interface Organization {
@@ -79,12 +126,17 @@ export interface ScanResponse {
   generated_at: string;
   candidates: MatrixCell[];
   previously_attempted: MatrixCell[];
-  /** The remainder the classification budget didn't reach; null if none. */
+  standard_of_care: MatrixCell[];
   unclassified: { trial_count: number; publication_count: number } | null;
   coverage: Coverage;
+  sampling: Sampling;
+  phase_distribution: PhaseDistribution;
+  publication_trend: PublicationTrend;
   key_organizations: Organization[];
   key_researchers: Researcher[];
-  // *_count is the true number of matches; *_analyzed is what was ingested.
+  /** Aggregated evidence posted back to /api/briefing. */
+  briefing_context: string;
+  coverage_note: string;
   trial_count: number;
   trials_analyzed: number;
   publication_count: number;
@@ -92,6 +144,23 @@ export interface ScanResponse {
   patent_count: number;
   patents_analyzed: number;
 }
+
+export interface ExecutiveBriefing {
+  clinical_state: string | null;
+  standard_of_care: string | null;
+  momentum: string | null;
+  bottlenecks: string | null;
+}
+
+export const BRIEFING_SECTIONS: {
+  key: keyof ExecutiveBriefing;
+  label: string;
+}[] = [
+  { key: "clinical_state", label: "Clinical state" },
+  { key: "standard_of_care", label: "Standard of care" },
+  { key: "momentum", label: "Where momentum is moving" },
+  { key: "bottlenecks", label: "Pipeline bottlenecks" },
+];
 
 export const FAILURE_CATEGORIES = [
   "safety",
@@ -113,3 +182,24 @@ export interface FailureAnalysis {
   summary: string | null;
   failure_points: FailurePoint[];
 }
+
+/** Human-readable phase labels. UNSPECIFIED covers observational studies. */
+export const PHASE_LABELS: Record<string, string> = {
+  EARLY_PHASE1: "Early Phase 1",
+  PHASE1: "Phase 1",
+  PHASE2: "Phase 2",
+  PHASE3: "Phase 3",
+  PHASE4: "Phase 4",
+  NA: "Not applicable",
+  UNSPECIFIED: "No phase listed",
+};
+
+export const PHASE_ORDER = [
+  "EARLY_PHASE1",
+  "PHASE1",
+  "PHASE2",
+  "PHASE3",
+  "PHASE4",
+  "NA",
+  "UNSPECIFIED",
+];

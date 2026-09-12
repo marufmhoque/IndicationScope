@@ -9,7 +9,7 @@ export default function Home() {
             Indication<span className="text-indigo-400">Scope</span>
           </h1>
           <p className="mt-3 text-gray-400 text-lg">
-            AI-powered orphan drug indication white-space discovery
+            Disease intelligence briefings: mechanisms, momentum, and unexplored opportunity
           </p>
         </div>
         <SearchForm />

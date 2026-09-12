@@ -1,3 +1,4 @@
+import ScoreLegend from "./ScoreLegend";
 import type { MatrixCell } from "../lib/types";
 
 interface Props {
@@ -5,7 +6,6 @@ interface Props {
 }
 
 export default function CandidateCard({ cell }: Props) {
-  const scorePercent = Math.round(cell.white_space_score * 100);
   const trialTotal = Object.values(cell.trial_count_by_status).reduce((a, b) => a + b, 0);
 
   // A rationale is generated on demand after the scan, so "no rationale yet" and
@@ -16,22 +16,29 @@ export default function CandidateCard({ cell }: Props) {
     (cell.context.abstracts.length > 0 || cell.context.trial_summaries.length > 0);
 
   return (
-    <div className="rounded-xl border border-indigo-800 bg-gray-900 p-5 space-y-3">
+    <div className="rounded-xl border border-indigo-800 bg-gray-900 p-5 space-y-3 break-inside-avoid print:border-gray-300 print:bg-white">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-xs text-gray-500 uppercase tracking-wider">Mechanism class</p>
-          <p className="font-semibold text-white">{cell.mechanism_class || "—"}</p>
+          <p className="font-semibold text-white print:text-black">
+            {cell.mechanism_class || "—"}
+          </p>
+          {cell.drug_class && (
+            <p className="text-xs text-gray-500 mt-0.5">{cell.drug_class}</p>
+          )}
         </div>
-        <div className="shrink-0 text-right">
-          <p className="text-xs text-gray-500 uppercase tracking-wider">Score</p>
-          <p className="text-2xl font-bold text-indigo-400">{scorePercent}</p>
-        </div>
+        <ScoreLegend
+          score={cell.white_space_score}
+          components={cell.score_components}
+        />
       </div>
 
       <div className="flex gap-6 text-sm text-gray-400">
         <span>
-          <span className="font-medium text-gray-200">{cell.publication_count}</span>{" "}
-          publications
+          <span className="font-medium text-gray-200 print:text-black">
+            {cell.literature_support}
+          </span>{" "}
+          supporting abstracts
         </span>
         <span>
           <span className="font-medium text-gray-200">{trialTotal}</span>{" "}

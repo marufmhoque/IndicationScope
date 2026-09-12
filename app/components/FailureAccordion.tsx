@@ -8,6 +8,9 @@ interface Props {
   cells: MatrixCell[];
   indication: string;
   persona: string;
+  /** Owned by the page so the exported report can include them. */
+  analyses: Record<string, FailureAnalysis>;
+  onAnalysis: (mechanism: string, analysis: FailureAnalysis) => void;
 }
 
 const CATEGORY_STYLES: Record<FailureCategory, string> = {
@@ -26,23 +29,56 @@ const CATEGORY_LABELS: Record<FailureCategory, string> = {
   unknown: "Not stated",
 };
 
-type Status = "idle" | "loading" | "done" | "error";
+export function canAnalyze(cell: MatrixCell): boolean {
+  return (
+    !!cell.context &&
+    (cell.context.abstracts.length > 0 || cell.context.trial_summaries.length > 0)
+  );
+}
 
-export default function FailureAccordion({ cells, indication, persona }: Props) {
+export async function fetchFailureAnalysis(
+  cell: MatrixCell,
+  indication: string,
+  persona: string
+): Promise<FailureAnalysis | null> {
+  const res = await fetch(apiUrl("/api/failure-analysis"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mechanism_class: cell.mechanism_class,
+      indication,
+      persona,
+      supporting_pmids: cell.supporting_pmids,
+      supporting_nct_ids: cell.supporting_nct_ids,
+      abstracts: cell.context?.abstracts ?? [],
+      trial_summaries: cell.context?.trial_summaries ?? [],
+    }),
+  });
+  return res.ok ? ((await res.json()) as FailureAnalysis) : null;
+}
+
+export default function FailureAccordion({
+  cells,
+  indication,
+  persona,
+  analyses,
+  onAnalysis,
+}: Props) {
   if (cells.length === 0) {
     return (
       <p className="text-sm text-gray-500">
-        No mechanisms with prior-failure signals were found in the analyzed sample.
+        No mechanism in the ingested sample carries a prior-failure signal. For a
+        small field that is a finding, not a gap in the data.
       </p>
     );
   }
 
   return (
     <div className="space-y-3">
-      <p className="text-sm text-gray-400">
-        Mechanisms with a terminated or negative trial in the record. These are held out
-        of the white-space ranking — a mechanism that was already tried and stopped is
-        not an untouched opportunity.
+      <p className="text-sm text-gray-400 print:text-black">
+        Mechanisms with a terminated or negative trial on record. These are held out
+        of the white-space ranking — a mechanism already tried and stopped is not an
+        untouched opportunity.
       </p>
       {cells.map((cell) => (
         <FailureRow
@@ -50,6 +86,8 @@ export default function FailureAccordion({ cells, indication, persona }: Props) 
           cell={cell}
           indication={indication}
           persona={persona}
+          analysis={analyses[cell.mechanism_class]}
+          onAnalysis={onAnalysis}
         />
       ))}
     </div>
@@ -60,64 +98,56 @@ function FailureRow({
   cell,
   indication,
   persona,
+  analysis,
+  onAnalysis,
 }: {
   cell: MatrixCell;
   indication: string;
   persona: string;
+  analysis?: FailureAnalysis;
+  onAnalysis: (mechanism: string, analysis: FailureAnalysis) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [status, setStatus] = useState<Status>("idle");
-  const [analysis, setAnalysis] = useState<FailureAnalysis | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   const trialTotal = Object.values(cell.trial_count_by_status).reduce((a, b) => a + b, 0);
-  const canAnalyze =
-    !!cell.context &&
-    (cell.context.abstracts.length > 0 || cell.context.trial_summaries.length > 0);
+  const analyzable = canAnalyze(cell);
 
   function toggle() {
     const next = !open;
     setOpen(next);
     // Generated on expand, not during the scan: most rows are never opened, and
-    // pre-generating every one would spend a model call each for nothing. The
-    // persona is re-read here, so re-opening after a lens switch re-synthesizes.
-    if (!next || status === "loading" || status === "done" || !canAnalyze) return;
+    // pre-generating each would spend a model call for nothing.
+    if (!next || loading || analysis || !analyzable) return;
 
-    setStatus("loading");
-    fetch(apiUrl("/api/failure-analysis"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        mechanism_class: cell.mechanism_class,
-        indication,
-        persona,
-        supporting_pmids: cell.supporting_pmids,
-        supporting_nct_ids: cell.supporting_nct_ids,
-        abstracts: cell.context?.abstracts ?? [],
-        trial_summaries: cell.context?.trial_summaries ?? [],
-      }),
-    })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((data: FailureAnalysis) => {
-        setAnalysis(data);
-        setStatus("done");
+    setLoading(true);
+    setFailed(false);
+    fetchFailureAnalysis(cell, indication, persona)
+      .then((data) => {
+        if (data) onAnalysis(cell.mechanism_class, data);
+        else setFailed(true);
       })
-      .catch(() => setStatus("error"));
+      .catch(() => setFailed(true))
+      .finally(() => setLoading(false));
   }
 
   return (
-    <div className="rounded-xl border border-amber-900/60 bg-gray-900">
+    <div className="rounded-xl border border-amber-900/60 bg-gray-900 break-inside-avoid print:border-gray-300 print:bg-white">
       <button
         onClick={toggle}
         aria-expanded={open}
         className="flex w-full items-center gap-3 px-5 py-4 text-left"
       >
-        <span className="text-gray-500 text-xs">{open ? "▾" : "▸"}</span>
-        <span className="font-semibold text-white">{cell.mechanism_class}</span>
-        <span className="ml-auto shrink-0 flex items-center gap-3 text-xs text-gray-400">
+        <span className="text-xs text-gray-500">{open ? "▾" : "▸"}</span>
+        <span className="font-semibold text-white print:text-black">
+          {cell.mechanism_class}
+        </span>
+        <span className="ml-auto flex shrink-0 items-center gap-3 text-xs text-gray-400">
           <span>
             {trialTotal} {trialTotal === 1 ? "trial" : "trials"}
           </span>
-          <span>{cell.publication_count} pubs</span>
+          <span>{cell.literature_support} abstracts</span>
           <span className="rounded-full bg-amber-900 px-2.5 py-0.5 text-amber-300">
             Prior failure
           </span>
@@ -125,29 +155,29 @@ function FailureRow({
       </button>
 
       {open && (
-        <div className="border-t border-gray-800 px-5 py-4 space-y-3">
-          {status === "loading" && (
-            <p className="text-sm text-gray-500">Reviewing the trial record…</p>
-          )}
+        <div className="space-y-3 border-t border-gray-800 px-5 py-4">
+          {loading && <p className="text-sm text-gray-500">Reviewing the trial record…</p>}
 
-          {status === "error" && (
+          {failed && (
             <p className="text-sm text-red-400">
               Could not generate the failure analysis. The trial records below are
               unaffected.
             </p>
           )}
 
-          {!canAnalyze && (
+          {!analyzable && (
             <p className="text-sm text-gray-500">
               No source text was retained for this mechanism, so its failures can&apos;t
-              be summarized.
+              be summarised.
             </p>
           )}
 
-          {status === "done" && analysis && (
+          {analysis && (
             <>
               {analysis.summary && (
-                <p className="text-sm text-gray-300 leading-relaxed">{analysis.summary}</p>
+                <p className="text-sm leading-relaxed text-gray-300 print:text-black">
+                  {analysis.summary}
+                </p>
               )}
 
               {analysis.failure_points.length > 0 ? (
@@ -161,7 +191,7 @@ function FailureRow({
                       >
                         {CATEGORY_LABELS[point.category] ?? CATEGORY_LABELS.unknown}
                       </span>
-                      <span className="text-sm text-gray-300">
+                      <span className="text-sm text-gray-300 print:text-black">
                         {point.reason}
                         {point.citations.length > 0 && (
                           <span className="ml-2 text-xs text-gray-500">
@@ -173,10 +203,9 @@ function FailureRow({
                   ))}
                 </ul>
               ) : (
-                // A real and common outcome: registry stop reasons are often
-                // absent or say only "Business Reasons". Saying so beats
-                // inventing a scientific explanation.
-                <p className="text-sm text-gray-500 italic">
+                // Registry stop reasons are frequently absent or say only
+                // "Business Reasons". Saying so beats inventing a cause.
+                <p className="text-sm italic text-gray-500">
                   The trial record doesn&apos;t state why these attempts stopped.
                 </p>
               )}

@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 
 from config import EXTRACTION_BUDGET
 from pipeline.normalization.entity_extraction import extract_mechanisms_batch
+from pipeline.normalization.pillar_mapper import assign_pillar
+from pipeline.scoring.literature_index import LiteratureIndex
 
 logger = logging.getLogger(__name__)
 
@@ -65,16 +67,23 @@ def build_matrix(
     for drug_key, group in drug_groups.items():
         result = mechanism_by_source.get(f"drug:{drug_key}") if drug_key else None
         mech = (result or {}).get("mechanism_class") or UNCLASSIFIED
+        drug_class = (result or {}).get("drug_class")
         if mech != UNCLASSIFIED:
             drugs_classified += 1
             trials_classified += len(group["trials"])
 
         for trial in group["trials"]:
             cell = _cell_for(cells, mech, indication)
+            # drug_class names the modality directly and was previously thrown
+            # away; it is what the pillar grouping is built from.
+            if drug_class and not cell["drug_class"]:
+                cell["drug_class"] = drug_class
             status = trial["status_class"]
             cell["trial_count_by_status"][status] = (
                 cell["trial_count_by_status"].get(status, 0) + 1
             )
+            for phase in trial.get("phases") or ["UNSPECIFIED"]:
+                cell["phase_counts"][phase] = cell["phase_counts"].get(phase, 0) + 1
             if status in _FAILURE_STATUSES:
                 cell["has_prior_failure"] = True
             if trial["nct_id"]:
@@ -95,11 +104,24 @@ def build_matrix(
         if _pub_year(pub.get("pub_date", "")) >= now_year - _RECENT_YEARS:
             cell["_recent_pub_count"] += 1
 
+    # Literature support is computed over every sampled abstract, not just the
+    # ~21 the model classified, because those yield 0-3 per cell — too sparse to
+    # rank on. See literature_index for why the corpus decides what is distinctive.
+    index = LiteratureIndex(publications)
+
     out = list(cells.values())
     for cell in out:
         total_pubs = cell["publication_count"]
-        cell["publication_growth_rate"] = (
+        cell["recent_publication_share"] = (
             cell.pop("_recent_pub_count") / total_pubs if total_pubs else 0.0
+        )
+        cell["literature_support"] = (
+            0 if cell["mechanism_class"] == UNCLASSIFIED
+            else index.support(cell["mechanism_class"])
+        )
+        cell["pillar"] = (
+            UNCLASSIFIED if cell["mechanism_class"] == UNCLASSIFIED
+            else assign_pillar(cell["drug_class"], cell["mechanism_class"])
         )
         cell["supporting_pmids"] = cell["supporting_pmids"][:10]
         cell["supporting_nct_ids"] = cell["supporting_nct_ids"][:10]
@@ -112,6 +134,7 @@ def build_matrix(
         "trials_classified": trials_classified,
         "publications_total": len(publications),
         "publications_classified": pubs_classified,
+        "abstracts_indexed": len(publications),
         "extraction_budget": budget,
     }
 
@@ -206,8 +229,12 @@ def _cell_for(cells: dict[str, dict], mechanism_class: str, indication: str) -> 
             "mechanism_class": mechanism_class,
             "indication": indication,
             "trial_count_by_status": {},
+            "phase_counts": {},
+            "drug_class": None,
+            "pillar": None,
             "publication_count": 0,
-            "publication_growth_rate": 0.0,
+            "literature_support": 0,
+            "recent_publication_share": 0.0,
             "white_space_score": 0.0,
             "has_prior_failure": False,
             "rationale": None,

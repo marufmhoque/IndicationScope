@@ -4,13 +4,15 @@ Every operation is best-effort. A cache is an optimisation, so a cache failure
 must never break a request — an earlier version constructed this at module import
 and took the whole API down with a 500 when the filesystem was read-only.
 
-Two caches share one database file:
+Three caches share one database file:
 
 - QueryCache: a whole ingestion result, keyed by the query. Short-lived value.
 - MechanismCache: entity -> mechanism class, keyed by the entity itself rather
   than the query. Aflibercept is a VEGF antagonist regardless of which disease
   was searched, so those entries are reusable across searches and never need
   invalidating.
+- BriefingCache: the executive briefing, keyed by disease. The most expensive
+  single call in the app, and identical for repeat views of the same disease.
 """
 
 import hashlib
@@ -186,3 +188,43 @@ class MechanismCache(_SqliteCache):
             many=[(key, json.dumps(value)) for key, value in results.items()],
         )
         logger.debug("Mechanism cache: stored %d entries", len(results))
+
+
+class BriefingCache(_SqliteCache):
+    """Caches the executive briefing, keyed by disease.
+
+    The briefing is the largest single model call in the app and is the same for
+    every view of a disease, so re-deriving it per page load is pure waste.
+    """
+
+    _TABLE_DDL = """
+        CREATE TABLE IF NOT EXISTS briefing_cache (
+            disease    TEXT PRIMARY KEY,
+            data       TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """
+
+    def get(self, disease: str) -> dict | None:
+        if not self._enabled or not disease:
+            return None
+        row = self._execute(
+            "SELECT data FROM briefing_cache WHERE disease = ?",
+            (disease.strip().lower(),),
+            fetch=True,
+        )
+        if not row:
+            return None
+        try:
+            return json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    def set(self, disease: str, data: dict) -> None:
+        if not self._enabled or not disease:
+            return
+        self._execute(
+            "INSERT OR REPLACE INTO briefing_cache (disease, data) VALUES (?, ?)",
+            (disease.strip().lower(), json.dumps(data)),
+            commit=True,
+        )

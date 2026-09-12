@@ -12,7 +12,10 @@ headline number stays accurate while only a sample is fetched.
 
 import logging
 import os
+import threading
+import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 
 import httpx
 
@@ -34,11 +37,31 @@ _MAX_AUTHORS = 10
 _TOOL = "indicationscope"
 _EMAIL = "indicationscope@example.com"
 
+# NCBI's published ceiling: 3 requests/second without an API key, 10 with one.
+# Firing the per-year trend queries in parallel without pacing returns errors
+# rather than counts, so every call goes through the same gate.
+_RPS_WITH_KEY = 9
+_RPS_NO_KEY = 2.5
+
+# Years of history for the publication trend. The current year is always
+# incomplete and is flagged, never silently plotted as a decline.
+_TREND_YEARS = 5
+
 
 class PubMedClient:
     def __init__(self, base_url: str = NCBI_BASE):
         self.base_url = base_url.rstrip("/")
         self.api_key = os.getenv("NCBI_API_KEY")
+        self._min_interval = 1.0 / (_RPS_WITH_KEY if self.api_key else _RPS_NO_KEY)
+        self._rate_lock = threading.Lock()
+        self._last_call = 0.0
+
+    def _rate_limit(self) -> None:
+        with self._rate_lock:
+            elapsed = time.monotonic() - self._last_call
+            if elapsed < self._min_interval:
+                time.sleep(self._min_interval - elapsed)
+            self._last_call = time.monotonic()
 
     def fetch_publications(self, disease: str) -> dict:
         """Return {"total": int, "records": list[dict]} for a disease query."""
@@ -54,6 +77,45 @@ class PubMedClient:
         )
         return {"total": total, "records": records}
 
+    def fetch_year_counts(self, disease: str) -> dict:
+        """Return {"years": {year: count}, "partial_year": int} for the trend.
+
+        Uses count-only searches (retmax=0, ~371 bytes each) rather than
+        fetching records, so history costs almost nothing. The sampled abstracts
+        can't supply this: esearch returns the most recent papers, so every
+        sampled record sits in the current window and shows no history at all.
+        """
+        current = datetime.now(timezone.utc).year
+        years: dict[int, int] = {}
+
+        for year in range(current - _TREND_YEARS + 1, current + 1):
+            try:
+                self._rate_limit()
+                resp = httpx.get(
+                    f"{self.base_url}/esearch.fcgi",
+                    params=self._params(
+                        term=disease,
+                        retmax=0,
+                        retmode="json",
+                        datetype="pdat",
+                        mindate=f"{year}/01/01",
+                        maxdate=f"{year}/12/31",
+                    ),
+                    timeout=_TIMEOUT,
+                )
+                resp.raise_for_status()
+                years[year] = int(resp.json()["esearchresult"]["count"])
+            except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+                # A missing trend is a missing chart, never a failed scan.
+                logger.warning(
+                    "Publication trend unavailable for %r (%s) — omitting",
+                    disease, type(exc).__name__,
+                )
+                return {"years": {}, "partial_year": current}
+
+        logger.info("Publication trend for %r: %s", disease, years)
+        return {"years": years, "partial_year": current}
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -66,6 +128,7 @@ class PubMedClient:
 
     def _search(self, query: str) -> tuple[int, list[str]]:
         """Return (true match count, sampled PMIDs)."""
+        self._rate_limit()
         resp = httpx.get(
             f"{self.base_url}/esearch.fcgi",
             params=self._params(term=query, retmax=_SAMPLE_SIZE, retmode="json"),
@@ -83,6 +146,7 @@ class PubMedClient:
         if not pmids:
             return []
 
+        self._rate_limit()
         resp = httpx.get(
             f"{self.base_url}/efetch.fcgi",
             params=self._params(id=",".join(pmids), retmode="xml"),

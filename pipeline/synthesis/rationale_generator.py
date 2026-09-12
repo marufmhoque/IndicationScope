@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 _PROMPTS = Path(__file__).parent / "prompts"
 _SYNTHESIS_PROMPT = _PROMPTS / "synthesis_prompt.txt"
 _FAILURE_PROMPT = _PROMPTS / "failure_prompt.txt"
+_BRIEFING_PROMPT = _PROMPTS / "executive_briefing_prompt.txt"
 _PERSONA_DIR = _PROMPTS / "personas"
 
 # Thinking tokens count against max_tokens. At 800 the model spent the whole
@@ -33,6 +34,10 @@ _PERSONA_DIR = _PROMPTS / "personas"
 # (stop_reason: max_tokens), so this needs real headroom above the ~400-token
 # JSON it actually has to emit.
 _MAX_TOKENS = 4000
+
+# The briefing writes four sections rather than one, so it needs more room
+# above the thinking allowance than a single rationale does.
+_BRIEFING_MAX_TOKENS = 6000
 
 # These are structured summarisation over supplied sources, not hard
 # reasoning. Low effort keeps latency and output-token spend down without
@@ -101,6 +106,67 @@ def generate_failure_analysis(
     return {
         "summary": parsed.get("summary"),
         "failure_points": _clean_failure_points(parsed.get("failure_points")),
+    }
+
+
+BRIEFING_SECTIONS = ("clinical_state", "standard_of_care", "momentum", "bottlenecks")
+
+
+def generate_executive_briefing(
+    indication: str,
+    context: str,
+    coverage_note: str,
+    persona: str = DEFAULT_PERSONA,
+) -> dict:
+    """Write the opening landscape briefing for a disease.
+
+    Args:
+        indication: the disease searched.
+        context: aggregated evidence — mechanisms with counts, phase mix,
+            publication trend, organisations, and sampled records.
+        coverage_note: how much of each corpus the analysis actually saw. Passed
+            into the prompt so the model calibrates its confidence: a briefing
+            drawn from 1.7% of registered trials must not read like one drawn
+            from all of them.
+
+    Returns a dict of the four sections, each str | None. Sections are
+    independent so a partial response degrades to a gap rather than nothing.
+    """
+    empty = {section: None for section in BRIEFING_SECTIONS}
+
+    if not context.strip():
+        return empty
+
+    client = _client()
+    if client is None:
+        logger.warning("ANTHROPIC_API_KEY not set — skipping executive briefing")
+        return empty
+
+    prompt = (
+        _load_prompt(_BRIEFING_PROMPT)
+        .replace("{persona_lens}", _load_persona_lens(persona))
+        .replace("{coverage_note}", coverage_note)
+        .replace("{indication}", indication)
+        .replace("{context}", context)
+    )
+
+    try:
+        response = client.messages.create(
+            model=SYNTHESIS_MODEL,
+            max_tokens=_BRIEFING_MAX_TOKENS,
+            output_config={"effort": _EFFORT},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        parsed = _parse_json_object(_response_text(response))
+    except Exception:
+        logger.exception("Executive briefing failed for indication=%r", indication)
+        return empty
+
+    if not parsed:
+        return empty
+
+    return {
+        section: (parsed.get(section) or None) for section in BRIEFING_SECTIONS
     }
 
 
