@@ -47,6 +47,11 @@ _RPS_NO_KEY = 2.5
 # incomplete and is flagged, never silently plotted as a decline.
 _TREND_YEARS = 5
 
+# One retry per year. NCBI throttling is bursty, and a second attempt a
+# moment later usually succeeds where the first was refused.
+_TREND_ATTEMPTS = 2
+_TREND_RETRY_DELAY = 0.6
+
 
 class PubMedClient:
     def __init__(self, base_url: str = NCBI_BASE):
@@ -87,8 +92,33 @@ class PubMedClient:
         """
         current = datetime.now(timezone.utc).year
         years: dict[int, int] = {}
+        failed = 0
 
         for year in range(current - _TREND_YEARS + 1, current + 1):
+            count = self._year_count(disease, year)
+            if count is None:
+                # One bad year must not discard the years already collected. A
+                # partial series still shows direction; an empty one shows
+                # nothing. NCBI throttles unauthenticated callers hard, and on
+                # shared serverless egress IPs that bites intermittently.
+                failed += 1
+                continue
+            years[year] = count
+
+        if failed:
+            logger.warning(
+                "Publication trend for %r: %d of %d years unavailable%s",
+                disease, failed, _TREND_YEARS,
+                "" if self.api_key else " (no NCBI_API_KEY — lower rate limit)",
+            )
+        else:
+            logger.info("Publication trend for %r: %s", disease, years)
+
+        return {"years": years, "partial_year": current}
+
+    def _year_count(self, disease: str, year: int) -> int | None:
+        """Publication count for one year, or None if it could not be read."""
+        for attempt in range(_TREND_ATTEMPTS):
             try:
                 self._rate_limit()
                 resp = httpx.get(
@@ -104,17 +134,15 @@ class PubMedClient:
                     timeout=_TIMEOUT,
                 )
                 resp.raise_for_status()
-                years[year] = int(resp.json()["esearchresult"]["count"])
+                return int(resp.json()["esearchresult"]["count"])
             except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
-                # A missing trend is a missing chart, never a failed scan.
-                logger.warning(
-                    "Publication trend unavailable for %r (%s) — omitting",
-                    disease, type(exc).__name__,
-                )
-                return {"years": {}, "partial_year": current}
-
-        logger.info("Publication trend for %r: %s", disease, years)
-        return {"years": years, "partial_year": current}
+                if attempt == _TREND_ATTEMPTS - 1:
+                    logger.debug(
+                        "Trend year %d unavailable for %r: %s", year, disease, exc
+                    )
+                    return None
+                time.sleep(_TREND_RETRY_DELAY)
+        return None
 
     # ------------------------------------------------------------------
     # Internals
