@@ -69,7 +69,7 @@ export default function ExportDialog({
                     ? "Everything is already generated — use Quick export."
                     : `Generates ${missing} missing ${
                         missing === 1 ? "section" : "sections"
-                      } first. Takes about a minute and uses your API credit.`}
+                      } first, which takes up to a minute.`}
                 </p>
               </button>
 

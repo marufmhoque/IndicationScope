@@ -35,8 +35,8 @@ export default function ReportDocument({ scan, briefing, rationales, failures }:
       </header>
 
       <Section title="Data examined">
-        <p className="text-sm">{scan.coverage_note}</p>
-        <ul className="mt-1 text-xs text-gray-700">
+        {/* Not coverage_note: that sentence is written as an instruction to the model. */}
+        <ul className="text-xs text-gray-700">
           <li>
             Trials: {scan.sampling.trials.ingested.toLocaleString()} of{" "}
             {scan.sampling.trials.total.toLocaleString()} registered (
@@ -218,10 +218,18 @@ function MechanismLine({ cell }: { cell: MatrixCell }) {
   );
 }
 
+/**
+ * Sections may break across pages: several run longer than a page, and forbidding
+ * the break pushed each one to a fresh page behind a blank gap (11 pages for ~6 of
+ * content). Only the heading is kept with what follows; individual entries keep
+ * their own break-inside-avoid.
+ */
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="mb-5 break-inside-avoid">
-      <h2 className="mb-1.5 border-b border-gray-300 pb-1 text-base font-bold">{title}</h2>
+    <section className="mb-5">
+      <h2 className="mb-1.5 border-b border-gray-300 pb-1 text-base font-bold [break-after:avoid]">
+        {title}
+      </h2>
       {children}
     </section>
   );
