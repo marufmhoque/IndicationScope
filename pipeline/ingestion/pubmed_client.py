@@ -52,6 +52,18 @@ _TREND_YEARS = 5
 _TREND_ATTEMPTS = 2
 _TREND_RETRY_DELAY = 0.6
 
+# Background retrieval for the brief's overview, epidemiology and cost sections.
+# The scan's own sample is the 200 most recent papers, which skews to new research
+# rather than disease basics, so these facets are fetched by relevance instead.
+# Small on purpose: a handful of well-matched abstracts per facet is enough to cite,
+# and it runs inside the brief request's time budget, not the scan's.
+_BACKGROUND_PER_FACET = 6
+_BACKGROUND_FACETS = {
+    "overview": 'review[pt] AND (symptom*[tiab] OR "clinical features"[tiab] OR pathophysiology[tiab] OR pathogenesis[tiab])',
+    "epidemiology": 'epidemiology[sh] OR prevalence[tiab] OR incidence[tiab]',
+    "cost": '"cost of illness"[MeSH] OR "costs and cost analysis"[MeSH] OR cost[ti] OR "economic burden"[tiab]',
+}
+
 
 class PubMedClient:
     def __init__(self, base_url: str = NCBI_BASE):
@@ -115,6 +127,61 @@ class PubMedClient:
             logger.info("Publication trend for %r: %s", disease, years)
 
         return {"years": years, "partial_year": current}
+
+    def fetch_background(self, disease: str) -> dict:
+        """Return {facet: [record, ...]} of relevance-ranked background abstracts.
+
+        Each facet fails independently to an empty list. PMIDs already used by an
+        earlier facet are skipped so one paper is not cited under two headings.
+        Records without an abstract are dropped: there is nothing to cite from.
+        """
+        seen: set[str] = set()
+        out: dict[str, list[dict]] = {}
+
+        for facet, clause in _BACKGROUND_FACETS.items():
+            try:
+                self._rate_limit()
+                resp = httpx.get(
+                    f"{self.base_url}/esearch.fcgi",
+                    params=self._params(
+                        term=f"({disease}) AND ({clause})",
+                        retmax=_BACKGROUND_PER_FACET * 2,
+                        retmode="json",
+                        sort="relevance",
+                    ),
+                    timeout=_TIMEOUT,
+                )
+                resp.raise_for_status()
+                ids = [
+                    pmid
+                    for pmid in resp.json().get("esearchresult", {}).get("idlist", [])
+                    if pmid not in seen
+                ][:_BACKGROUND_PER_FACET]
+                records = self._fetch_records(ids) if ids else []
+            except (httpx.HTTPError, ET.ParseError, KeyError, ValueError, TypeError) as exc:
+                logger.warning(
+                    "Background facet %r unavailable for %r (%s)",
+                    facet, disease, type(exc).__name__,
+                )
+                records = []
+
+            seen.update(r["pmid"] for r in records)
+            out[facet] = [
+                {
+                    "pmid": r["pmid"],
+                    "title": r["title"],
+                    "abstract": r["abstract"],
+                    "pub_date": r["pub_date"],
+                }
+                for r in records
+                if r.get("abstract")
+            ]
+
+        logger.info(
+            "Background literature for %r: %s",
+            disease, {facet: len(records) for facet, records in out.items()},
+        )
+        return out
 
     def _year_count(self, disease: str, year: int) -> int | None:
         """Publication count for one year, or None if it could not be read."""

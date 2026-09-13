@@ -1,44 +1,12 @@
 // Shared shapes for the /api/scan response.
 //
 // These mirror the Python response in api/index.py — when a field changes there,
-// it changes here. MatrixCell was once redeclared in three components, which
-// meant a backend change could leave two of them silently wrong.
-
-export const PERSONAS = [
-  {
-    value: "academic",
-    label: "Academic",
-    blurb: "Biology and pathway rationale; where the literature clusters.",
-  },
-  {
-    value: "startup",
-    label: "Startup",
-    blurb: "Competitive density, unclaimed space, patent position.",
-  },
-  {
-    value: "diligence",
-    label: "Due Diligence",
-    blurb: "Risk first: safety signals, prior failures, evidence quality.",
-  },
-] as const;
-
-export type Persona = (typeof PERSONAS)[number]["value"];
+// it changes here, so a backend change can't leave a component silently wrong.
 
 /** Source text a cell carries so synthesis can run without re-ingesting. */
 export interface CellContext {
   abstracts: string[];
   trial_summaries: string[];
-}
-
-/** Why a cell scored what it did — shown in the score legend. */
-export interface ScoreComponents {
-  literature_support: number;
-  max_support: number;
-  evidence: number;
-  openness: number;
-  active_trials: number;
-  total_trials: number;
-  failure_penalty: number;
 }
 
 export interface MatrixCell {
@@ -47,23 +15,23 @@ export interface MatrixCell {
   trial_count_by_status: Record<string, number>;
   phase_counts: Record<string, number>;
   drug_class: string | null;
+  /** Molecular target reported for the mechanism's agents. */
+  target: string | null;
   /** Treatment modality, derived from drug_class. */
   pillar: string | null;
   publication_count: number;
   /** Abstracts matching this mechanism across the whole sample. */
   literature_support: number;
-  recent_publication_share: number;
-  white_space_score: number;
-  score_components?: ScoreComponents;
   has_prior_failure: boolean;
+  /** Evidence summary text (API key kept as "rationale"). */
   rationale: string | null;
   supporting_pmids: string[];
   supporting_nct_ids: string[];
-  /** Present only on the top few cells per section. */
+  /** Present only on the leading cells of each list. */
   context?: CellContext;
 }
 
-/** How much of the corpus was classified, once ingested. */
+/** How much of the ingested corpus was classified. */
 export interface Coverage {
   distinct_drugs: number;
   drugs_attempted: number;
@@ -78,7 +46,7 @@ export interface Coverage {
 
 /**
  * How much of each corpus was ingested at all. Ranges from ~2% (type 2
- * diabetes) to 100% (rare indications) — the difference the UI must convey.
+ * diabetes) to 100% (rare indications).
  */
 export interface SourceSampling {
   ingested: number;
@@ -122,11 +90,12 @@ export interface Researcher {
 }
 
 export interface ScanResponse {
-  query: { disease: string; mechanism: string | null; persona: string };
+  query: { disease: string; mechanism: string | null };
   generated_at: string;
-  candidates: MatrixCell[];
+  /** Classified mechanisms without a recorded terminated/negative trial, by activity. */
+  mechanisms: MatrixCell[];
+  /** Classified mechanisms with at least one terminated/negative trial, by activity. */
   previously_attempted: MatrixCell[];
-  standard_of_care: MatrixCell[];
   unclassified: { trial_count: number; publication_count: number } | null;
   coverage: Coverage;
   sampling: Sampling;
@@ -145,21 +114,32 @@ export interface ScanResponse {
   patents_analyzed: number;
 }
 
-export interface ExecutiveBriefing {
-  clinical_state: string | null;
-  standard_of_care: string | null;
-  momentum: string | null;
-  bottlenecks: string | null;
+export type BriefingSectionKey =
+  | "disease_overview"
+  | "molecular_mechanisms"
+  | "epidemiology"
+  | "standard_of_treatment"
+  | "current_research"
+  | "historical_failures";
+
+/** A background abstract retrieved for the brief's overview, epidemiology or cost sections. */
+export interface BriefingReference {
+  pmid: string;
+  title: string;
+  facet: "overview" | "epidemiology" | "cost" | string;
 }
 
-export const BRIEFING_SECTIONS: {
-  key: keyof ExecutiveBriefing;
-  label: string;
-}[] = [
-  { key: "clinical_state", label: "Clinical state" },
-  { key: "standard_of_care", label: "Standard of care" },
-  { key: "momentum", label: "Where momentum is moving" },
-  { key: "bottlenecks", label: "Pipeline bottlenecks" },
+export type ExecutiveBriefing = Record<BriefingSectionKey, string | null> & {
+  references?: BriefingReference[];
+};
+
+export const BRIEFING_SECTIONS: { key: BriefingSectionKey; label: string }[] = [
+  { key: "disease_overview", label: "Disease Overview & Symptoms" },
+  { key: "molecular_mechanisms", label: "Molecular Mechanisms & Affected Proteins" },
+  { key: "epidemiology", label: "Disease Population & Epidemiology" },
+  { key: "standard_of_treatment", label: "Current Standard of Treatment" },
+  { key: "current_research", label: "Clinical Research Currently Being Conducted" },
+  { key: "historical_failures", label: "Historical Context of Trial Failures" },
 ];
 
 export const FAILURE_CATEGORIES = [

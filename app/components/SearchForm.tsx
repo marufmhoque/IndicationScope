@@ -2,18 +2,16 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { PERSONAS } from "../lib/types";
 
 export default function SearchForm() {
   const router = useRouter();
   const [disease, setDisease] = useState("");
   const [mechanism, setMechanism] = useState("");
-  const [persona, setPersona] = useState<string>("academic");
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!disease.trim()) return;
-    const params = new URLSearchParams({ disease: disease.trim(), persona });
+    const params = new URLSearchParams({ disease: disease.trim() });
     if (mechanism.trim()) params.set("mechanism", mechanism.trim());
     router.push(`/results?${params.toString()}`);
   }
@@ -48,40 +46,12 @@ export default function SearchForm() {
         />
       </div>
 
-      <div className="space-y-2">
-        <label className="block text-sm font-medium text-gray-300">
-          Analysis lens{" "}
-          <span className="text-gray-500 font-normal">
-            (changes how findings are framed, not what is searched)
-          </span>
-        </label>
-        <div className="flex gap-2">
-          {PERSONAS.map((p) => (
-            <button
-              key={p.value}
-              type="button"
-              onClick={() => setPersona(p.value)}
-              className={`flex-1 rounded-lg border px-4 py-2 text-sm font-medium transition-colors ${
-                persona === p.value
-                  ? "border-indigo-500 bg-indigo-600 text-white"
-                  : "border-gray-700 bg-gray-900 text-gray-400 hover:border-gray-500"
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
-        <p className="text-xs text-gray-500">
-          {PERSONAS.find((p) => p.value === persona)?.blurb}
-        </p>
-      </div>
-
       <button
         type="submit"
         disabled={!disease.trim()}
         className="w-full rounded-lg bg-indigo-600 px-6 py-3 font-semibold text-white hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
       >
-        Scan
+        Generate brief
       </button>
     </form>
   );

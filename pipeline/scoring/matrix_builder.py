@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
 
 from config import EXTRACTION_BUDGET
 from pipeline.normalization.entity_extraction import extract_mechanisms_batch
@@ -21,7 +20,6 @@ UNCLASSIFIED = "Unclassified"
 # publication only implies it.
 _TRIAL_SHARE = 0.65
 
-_RECENT_YEARS = 3
 _FAILURE_STATUSES = frozenset(["COMPLETED_NEGATIVE", "TERMINATED"])
 
 
@@ -41,8 +39,8 @@ def build_matrix(
         indication: The disease this search was scoped to. Constant across all
             cells — mechanism_class is the axis that varies within one search.
         max_extraction_items: Cap on records sent to the LLM, from the caller's
-            wall-clock guard. 0 skips classification entirely; counts and scores
-            still come back with everything under "Unclassified".
+            wall-clock guard. 0 skips classification entirely; counts still come
+            back with everything under "Unclassified".
 
     Returns:
         {"cells": [MatrixCell, ...], "coverage": {...}} — coverage reports how
@@ -54,13 +52,10 @@ def build_matrix(
     )
 
     drug_groups = _group_trials_by_drug(trials)
-    items, drugs_selected, pubs_selected = _build_extraction_items(
-        drug_groups, publications, budget
-    )
+    items, drugs_selected, _ = _build_extraction_items(drug_groups, publications, budget)
     mechanism_by_source = extract_mechanisms_batch(items)
 
     cells: dict[str, dict] = {}
-    now_year = datetime.now(timezone.utc).year
     trials_classified = 0
     drugs_classified = 0
 
@@ -68,16 +63,19 @@ def build_matrix(
         result = mechanism_by_source.get(f"drug:{drug_key}") if drug_key else None
         mech = (result or {}).get("mechanism_class") or UNCLASSIFIED
         drug_class = (result or {}).get("drug_class")
+        # The molecular target was extracted alongside the mechanism and used to be
+        # discarded; it is the objective source for "affected proteins".
+        target = (result or {}).get("target")
         if mech != UNCLASSIFIED:
             drugs_classified += 1
             trials_classified += len(group["trials"])
 
         for trial in group["trials"]:
             cell = _cell_for(cells, mech, indication)
-            # drug_class names the modality directly and was previously thrown
-            # away; it is what the pillar grouping is built from.
             if drug_class and not cell["drug_class"]:
                 cell["drug_class"] = drug_class
+            if target and not cell["target"]:
+                cell["target"] = target
             status = trial["status_class"]
             cell["trial_count_by_status"][status] = (
                 cell["trial_count_by_status"].get(status, 0) + 1
@@ -98,23 +96,19 @@ def build_matrix(
             pubs_classified += 1
 
         cell = _cell_for(cells, mech, indication)
+        if (result or {}).get("target") and not cell["target"]:
+            cell["target"] = result["target"]
         cell["publication_count"] += 1
         if pmid:
             cell["supporting_pmids"].append(pmid)
-        if _pub_year(pub.get("pub_date", "")) >= now_year - _RECENT_YEARS:
-            cell["_recent_pub_count"] += 1
 
-    # Literature support is computed over every sampled abstract, not just the
-    # ~21 the model classified, because those yield 0-3 per cell — too sparse to
-    # rank on. See literature_index for why the corpus decides what is distinctive.
+    # Literature support is counted over every sampled abstract, not just the ~21
+    # the model classified, because those yield 0-3 per cell. See literature_index
+    # for why the corpus decides which words are distinctive.
     index = LiteratureIndex(publications)
 
     out = list(cells.values())
     for cell in out:
-        total_pubs = cell["publication_count"]
-        cell["recent_publication_share"] = (
-            cell.pop("_recent_pub_count") / total_pubs if total_pubs else 0.0
-        )
         cell["literature_support"] = (
             0 if cell["mechanism_class"] == UNCLASSIFIED
             else index.support(cell["mechanism_class"])
@@ -155,10 +149,9 @@ def _group_trials_by_drug(trials: list[dict]) -> dict[str, dict]:
     """Collapse trials onto the drug they test.
 
     A single drug recurs across many trials — ranibizumab appears in 13 of 200
-    wet-AMD trials — and classifying it once instead of once per trial is the
-    difference between spending the budget on breadth and spending it on
-    repetition. Trials with no named intervention group under "" and stay
-    unclassified; there is nothing to classify.
+    wet-AMD trials — so classifying it once instead of once per trial spends the
+    budget on breadth rather than repetition. Trials with no named intervention
+    group under "" and stay unclassified; there is nothing to classify.
     """
     groups: dict[str, dict] = defaultdict(
         lambda: {"label": "", "trials": [], "context": ""}
@@ -172,10 +165,8 @@ def _group_trials_by_drug(trials: list[dict]) -> dict[str, dict]:
         if raw and not group["label"]:
             group["label"] = raw
             # Investigational agents are named by code (EYP-1901, ADVM-022), which
-            # carries no mechanistic signal on its own — the model correctly
-            # declines to guess, and those are exactly the novel agents worth
-            # surfacing. The trial's own text usually states the mechanism, so it
-            # travels with the name at no extra call.
+            # carries no mechanistic signal on its own. The trial's own text
+            # usually states the mechanism, so it travels with the name.
             group["context"] = f"{trial.get('brief_title', '')} {trial.get('brief_summary', '')}"
     return dict(groups)
 
@@ -219,10 +210,9 @@ def _build_extraction_items(
 
 def _cell_for(cells: dict[str, dict], mechanism_class: str, indication: str) -> dict:
     """Group by a canonicalized key so e.g. "orexin-2 receptor agonist" and
-    "orexin 2 receptor agonist" land in the same cell — independent
-    per-item extraction calls otherwise phrase the same mechanism
-    differently often enough to fragment obviously-identical results.
-    The first-seen raw phrasing is kept as the display label."""
+    "orexin 2 receptor agonist" land in the same cell — independent per-item
+    extraction calls otherwise phrase the same mechanism differently often
+    enough to fragment identical results. The first-seen phrasing is kept."""
     key = _canonical_key(mechanism_class)
     if key not in cells:
         cells[key] = {
@@ -231,16 +221,14 @@ def _cell_for(cells: dict[str, dict], mechanism_class: str, indication: str) -> 
             "trial_count_by_status": {},
             "phase_counts": {},
             "drug_class": None,
+            "target": None,
             "pillar": None,
             "publication_count": 0,
             "literature_support": 0,
-            "recent_publication_share": 0.0,
-            "white_space_score": 0.0,
             "has_prior_failure": False,
             "rationale": None,
             "supporting_pmids": [],
             "supporting_nct_ids": [],
-            "_recent_pub_count": 0,
         }
     return cells[key]
 
@@ -250,11 +238,3 @@ def _canonical_key(text: str) -> str:
     lowered = re.sub(r"[-_]", " ", lowered)
     lowered = re.sub(r"\breceptor\b", "", lowered)
     return re.sub(r"\s+", " ", lowered).strip()
-
-
-def _pub_year(pub_date: str) -> int:
-    """Best-effort year extraction from a 'YYYY[-Mon[-DD]]' or free-text pub_date."""
-    for token in pub_date.replace("-", " ").split():
-        if token.isdigit() and len(token) == 4:
-            return int(token)
-    return 0

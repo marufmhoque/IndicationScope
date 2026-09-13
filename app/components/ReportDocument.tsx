@@ -16,29 +16,25 @@ interface Props {
 }
 
 /**
- * The printable briefing.
+ * The printable brief.
  *
- * Hidden on screen and shown only in print. The screen view is tabbed, so only
- * one section is mounted at a time — a report has to contain all of them at
- * once, which is why this exists rather than restyling the live page.
+ * Hidden on screen and shown only in print. The screen view is tabbed, so only one
+ * section is mounted at a time — a report has to contain all of them at once.
  */
-export default function ReportDocument({
-  scan,
-  briefing,
-  rationales,
-  failures,
-}: Props) {
+export default function ReportDocument({ scan, briefing, rationales, failures }: Props) {
+  const references = briefing?.references ?? [];
+
   return (
     <div className="hidden print:block text-black">
       <header className="mb-6 border-b border-gray-400 pb-3">
         <h1 className="text-2xl font-bold">{scan.query.disease}</h1>
         <p className="text-xs text-gray-700">
-          Disease intelligence briefing · generated{" "}
+          Disease intelligence brief · generated{" "}
           {new Date(scan.generated_at).toLocaleString()} · IndicationScope
         </p>
       </header>
 
-      <Section title="Coverage">
+      <Section title="Data examined">
         <p className="text-sm">{scan.coverage_note}</p>
         <ul className="mt-1 text-xs text-gray-700">
           <li>
@@ -58,26 +54,25 @@ export default function ReportDocument({
           <li>
             Mechanism classification reached {scan.coverage.drugs_classified} of{" "}
             {scan.coverage.distinct_drugs} distinct interventions, covering{" "}
-            {scan.coverage.trials_classified} of {scan.coverage.trials_total} ingested
+            {scan.coverage.trials_classified} of {scan.coverage.trials_total} examined
             trials.
           </li>
         </ul>
       </Section>
 
-      {briefing && BRIEFING_SECTIONS.some(({ key }) => briefing[key]) && (
-        <Section title="Executive summary">
-          {BRIEFING_SECTIONS.filter(({ key }) => briefing[key]).map(
-            ({ key, label }) => (
-              <div key={key} className="mb-3 break-inside-avoid">
-                <h3 className="text-sm font-semibold">{label}</h3>
-                <p className="text-sm leading-relaxed">{briefing[key]}</p>
-              </div>
-            )
-          )}
+      {briefing && BRIEFING_SECTIONS.some(({ key }) => briefing[key]) ? (
+        BRIEFING_SECTIONS.filter(({ key }) => briefing[key]).map(({ key, label }, i) => (
+          <Section key={key} title={`${i + 1}. ${label}`}>
+            <p className="text-sm leading-relaxed">{briefing[key]}</p>
+          </Section>
+        ))
+      ) : (
+        <Section title="Disease intelligence brief">
+          <p className="text-sm italic text-gray-600">Brief not generated for this export.</p>
         </Section>
       )}
 
-      <Section title="Research momentum">
+      <Section title="Publication volume and trial phases">
         <p className="text-sm">
           Publications per year:{" "}
           {Object.keys(scan.publication_trend.years).length === 0
@@ -102,44 +97,26 @@ export default function ReportDocument({
         </p>
       </Section>
 
-      <Section title="Standard of care & active landscape">
-        {scan.standard_of_care.length === 0 ? (
-          <p className="text-sm">
-            No mechanism in the ingested sample carries enough trial activity to
-            characterise a standard of care.
-          </p>
+      <Section title="Mechanism classes in the examined record">
+        {scan.mechanisms.length === 0 ? (
+          <p className="text-sm">No mechanism classes were identified.</p>
         ) : (
-          scan.standard_of_care.slice(0, 10).map((cell) => (
-            <MechanismLine key={cell.mechanism_class} cell={cell} />
-          ))
-        )}
-      </Section>
-
-      <Section title="White space opportunities">
-        {scan.candidates.length === 0 ? (
-          <p className="text-sm">
-            No white-space candidates were identified in the ingested sample.
-          </p>
-        ) : (
-          scan.candidates.slice(0, 10).map((cell) => (
+          scan.mechanisms.slice(0, 15).map((cell) => (
             <div key={cell.mechanism_class} className="mb-3 break-inside-avoid">
-              <MechanismLine cell={cell} showScore />
-              <p className="text-sm leading-relaxed">
-                {rationales[cell.mechanism_class] ?? (
-                  <span className="italic text-gray-600">
-                    Rationale not generated for this export.
-                  </span>
-                )}
-              </p>
+              <MechanismLine cell={cell} />
+              {rationales[cell.mechanism_class] && (
+                <p className="text-sm leading-relaxed">{rationales[cell.mechanism_class]}</p>
+              )}
             </div>
           ))
         )}
       </Section>
 
-      <Section title="Previously attempted & why they failed">
+      <Section title="Mechanism classes with terminated or negative trials">
         {scan.previously_attempted.length === 0 ? (
           <p className="text-sm">
-            No mechanism in the ingested sample carries a prior-failure signal.
+            No mechanism class in the examined trials has a trial recorded as terminated or
+            completed with a negative result.
           </p>
         ) : (
           scan.previously_attempted.map((cell) => {
@@ -154,15 +131,12 @@ export default function ReportDocument({
                   <ul className="mt-1 list-disc pl-5 text-sm">
                     {analysis.failure_points.map((point, i) => (
                       <li key={i}>
-                        <span className="font-medium uppercase text-[10px] mr-1">
+                        <span className="mr-1 text-[10px] font-medium uppercase">
                           {point.category}
                         </span>
                         {point.reason}
                         {point.citations.length > 0 && (
-                          <span className="text-gray-600">
-                            {" "}
-                            ({point.citations.join(", ")})
-                          </span>
+                          <span className="text-gray-600"> ({point.citations.join(", ")})</span>
                         )}
                       </li>
                     ))}
@@ -170,12 +144,12 @@ export default function ReportDocument({
                 )}
                 {analysis && analysis.failure_points.length === 0 && !analysis.summary && (
                   <p className="text-sm italic text-gray-600">
-                    The trial record doesn&apos;t state why these attempts stopped.
+                    The trial record does not state why these trials stopped.
                   </p>
                 )}
                 {!analysis && (
                   <p className="text-sm italic text-gray-600">
-                    Failure analysis not generated for this export.
+                    Summary not generated for this export.
                   </p>
                 )}
               </div>
@@ -184,16 +158,16 @@ export default function ReportDocument({
         )}
       </Section>
 
-      <Section title="Key players">
+      <Section title="Sponsors, assignees and authors">
         <p className="text-sm">
           <strong>Organisations:</strong>{" "}
           {scan.key_organizations
             .slice(0, 12)
-            .map((o) => `${o.name} (${o.trial_count})`)
+            .map((o) => `${o.name} (${o.trial_count} trials, ${o.patent_count} patents)`)
             .join(" · ") || "none identified"}
         </p>
         <p className="mt-1 text-sm">
-          <strong>Researchers:</strong>{" "}
+          <strong>Authors:</strong>{" "}
           {scan.key_researchers
             .slice(0, 12)
             .map((r) => `${r.name} (${r.publication_count})`)
@@ -201,62 +175,53 @@ export default function ReportDocument({
         </p>
       </Section>
 
+      {references.length > 0 && (
+        <Section title="Background literature">
+          <ul className="text-xs">
+            {references.map((ref) => (
+              <li key={ref.pmid}>
+                PMID {ref.pmid} ({ref.facet}): {ref.title}
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
+
       <footer className="mt-6 border-t border-gray-400 pt-3 text-[10px] leading-relaxed text-gray-700">
         <p>
-          <strong>Method and limits.</strong> Built from ClinicalTrials.gov, PubMed,
+          <strong>Method and limits.</strong> Compiled from ClinicalTrials.gov, PubMed,
           Google Patents and the USPTO Open Data Portal. Mechanism classes and all
-          narrative sections are model-generated from the sampled sources above and
-          are not a literature review. Scores rank mechanisms within this search
-          only and are not comparable across diseases. Trial activity is not
-          regulatory approval — this data contains no approval status, and Phase 4
-          indicates post-marketing study. Verify every cited PMID and NCT ID before
-          relying on it.
+          narrative sections are model-generated from the sources listed and are not a
+          systematic review. Counts describe the examined records, which may be a sample
+          of a larger registry or literature. Trial registration is not regulatory
+          approval — the data contains no approval status, and Phase 4 indicates
+          post-marketing study. Verify each cited PMID and NCT ID before relying on it.
         </p>
       </footer>
     </div>
   );
 }
 
-function MechanismLine({
-  cell,
-  showScore = false,
-}: {
-  cell: MatrixCell;
-  showScore?: boolean;
-}) {
-  const total = Object.values(cell.trial_count_by_status ?? {}).reduce(
-    (a, b) => a + b,
-    0
-  );
+function MechanismLine({ cell }: { cell: MatrixCell }) {
+  const counts = cell.trial_count_by_status ?? {};
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
   return (
     <p className="text-sm font-semibold">
       {cell.mechanism_class}
-      {showScore && (
-        <span className="ml-2 font-normal">
-          score {Math.round(cell.white_space_score * 100)}
-        </span>
-      )}
       <span className="ml-2 font-normal text-gray-700">
-        {total} {total === 1 ? "trial" : "trials"} · {cell.literature_support}{" "}
-        abstracts
+        {cell.target ? `target ${cell.target} · ` : ""}
+        {total} {total === 1 ? "trial" : "trials"} · {counts.ACTIVE ?? 0} active ·{" "}
+        {cell.literature_support} abstracts
         {cell.pillar ? ` · ${cell.pillar}` : ""}
       </span>
     </p>
   );
 }
 
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="mb-5 break-inside-avoid">
-      <h2 className="mb-1.5 border-b border-gray-300 pb-1 text-base font-bold">
-        {title}
-      </h2>
+      <h2 className="mb-1.5 border-b border-gray-300 pb-1 text-base font-bold">{title}</h2>
       {children}
     </section>
   );

@@ -198,7 +198,7 @@ class BriefingCache(_SqliteCache):
     """
 
     _TABLE_DDL = """
-        CREATE TABLE IF NOT EXISTS briefing_cache (
+        CREATE TABLE IF NOT EXISTS briefing_cache_v2 (
             disease    TEXT PRIMARY KEY,
             data       TEXT NOT NULL,
             created_at TEXT DEFAULT (datetime('now'))
@@ -209,7 +209,7 @@ class BriefingCache(_SqliteCache):
         if not self._enabled or not disease:
             return None
         row = self._execute(
-            "SELECT data FROM briefing_cache WHERE disease = ?",
+            "SELECT data FROM briefing_cache_v2 WHERE disease = ?",
             (disease.strip().lower(),),
             fetch=True,
         )
@@ -224,7 +224,7 @@ class BriefingCache(_SqliteCache):
         if not self._enabled or not disease:
             return
         self._execute(
-            "INSERT OR REPLACE INTO briefing_cache (disease, data) VALUES (?, ?)",
+            "INSERT OR REPLACE INTO briefing_cache_v2 (disease, data) VALUES (?, ?)",
             (disease.strip().lower(), json.dumps(data)),
             commit=True,
         )
